@@ -4,7 +4,7 @@ A mod for the **Code tab of the Claude Desktop app** that puts a countdown for e
 
 > **Made for Claude Desktop, not the `claude` CLI.** The band, its buttons, the charts and every animation are drawn for Desktop's Code tab. In a terminal session the mod still loads, but you get a plain text line and none of the visuals; it isn't designed or tested there.
 
-<img src="docs/band.gif" alt="The band above the prompt: Cache warm, turn running (1h TTL), 222k cached, with an LED panel sweeping across as a new cache is written" width="664">
+<img src="docs/band.gif" alt="The band above the prompt: Cache warm, turn running (1h TTL), 222k cached, with the Keep-warm, Compact and Stats buttons, and an LED panel sweeping across as a new cache is written" width="760">
 
 When a message you send reuses the warm cache, a little pixel Clawd celebrates what it saved:
 
