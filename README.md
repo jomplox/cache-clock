@@ -8,7 +8,7 @@ A mod for the **Code tab of the Claude Desktop app** that puts a countdown for e
 
 When a message you send reuses the warm cache, a little pixel Clawd celebrates what it saved:
 
-<img src="docs/reward.gif" alt="Clawd catching a coin into a piggy bank, putting on sunglasses, sipping from a mug, flipping an hourglass and strumming a guitar, while 'Saved $12.36' rolls up beside him" width="560">
+<img src="docs/reward.gif" alt="Clawd catching a coin into a piggy bank, putting on sunglasses, sipping from a mug, flipping an hourglass and strumming a guitar, while 'Saved $12.36' rolls up beside him, next to what the prompt cost" width="560">
 
 ## Why
 
