@@ -722,7 +722,7 @@ async function replayDemo($: EngineInterface, s: Settings, flags: Flags): Promis
     const prize = await read($, reward)
     if (prize !== null && now - prize.at < REWARD_MS + 600) return
     const variant = REWARD_VARIANTS[flags.demoIndex++ % REWARD_VARIANTS.length]!
-    const r: Reward = { at: now, variant, saved: 12.36, today: 41.8, streak: 7 }
+    const r: Reward = { at: now, variant, saved: 12.36, paid: 0.32, isPaidExact: true, today: 41.8, streak: 7 }
     if (variant === 'hourglass') r.spare = 41_000
     if (variant === 'guitar') r.milestone = '$50 saved today'
     await playReward($, s, flags, r)
@@ -772,6 +772,7 @@ async function startReward($: EngineInterface, s: Settings, flags: Flags, info: 
   const { base, read: readMult } = price(info.model)
   if (base === null) return null
   const saved = (tokens * base * (writeMult(info.ttlMin) - readMult)) / 1e6
+  const paid = (tokens * base * readMult) / 1e6
   // Less than a cent shows as $0.00: not worth a scene.
   if (saved < 0.005) return null
   const totals = await readTotals($, at)
@@ -782,7 +783,7 @@ async function startReward($: EngineInterface, s: Settings, flags: Flags, info: 
   const milestone = crossed !== undefined ? `$${crossed} saved today` : streak % 25 === 0 ? `${streak} in a row` : undefined
   const spare = left < alertLead(info.ttlMin) ? left : undefined
   const variant: RewardVariant = milestone ? 'guitar' : spare !== undefined ? 'hourglass' : REWARD_EVERYDAY[streak % REWARD_EVERYDAY.length]!
-  const r: Reward = { at, variant, saved, today, streak, ...(spare !== undefined ? { spare } : {}), ...(milestone ? { milestone } : {}) }
+  const r: Reward = { at, variant, saved, paid, today, streak, ...(spare !== undefined ? { spare } : {}), ...(milestone ? { milestone } : {}) }
   await playReward($, s, flags, r)
   return r
 }
@@ -945,7 +946,7 @@ function rewardLine({ Box, Text, Svg }: Pick<Elements['desktop'], 'Box' | 'Text'
     </Box>,
     <Box key="reward-tail" flexShrink={0}>
       <Text>
-        <Text dimColor>{`${r.spare !== undefined ? ` with ${clock(r.spare)} to spare` : ''} · `}</Text>
+        <Text dimColor>{`${r.spare !== undefined ? ` with ${clock(r.spare)} to spare` : ''} · prompt ${r.isPaidExact ? '' : '≈'}$${r.paid.toFixed(2)} · `}</Text>
         {r.milestone ? <Text bold color={GOLD}>{r.milestone}</Text> : <Text dimColor>{`$${r.today.toFixed(2)} today`}</Text>}
         {isStreakMilestone ? null : <Text dimColor>{` · ${r.streak} in a row`}</Text>}
       </Text>
@@ -1212,6 +1213,13 @@ export const register: Register = (on, options) => {
         const won = prize
         const totals = await readTotals($, won.at)
         if (isMiss) await takeBack($, flags, won)
+        else {
+          // What the prompt really cost: the cache read, what it wrote, the rest.
+          const { base, read: readMult } = price(bare(e.model))
+          const ttlMin = prev?.ttlMin ?? DEFAULT_TTL
+          const paid = base === null ? won.paid : (base * (hit * readMult + write * writeMult(ttlMin) + (usage.input_tokens ?? 0))) / 1e6
+          await update($, reward, r => (r?.at === won.at ? { ...r, paid, isPaidExact: true } : r))
+        }
         await $.store
           .set(TOTALS_KEY, isMiss ? { ...totals, streak: 0 } : { day: totals.day, saved: totals.saved + won.saved, streak: totals.streak + 1 })
           .catch(() => {})

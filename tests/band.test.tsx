@@ -495,6 +495,8 @@ test('a typed message on the warm cache plays a reward and counts it; a miss tak
   expect(await band.find({ key: 'reward-1060000' })).toBeDefined()
   expect(await band.find({ text: /Saved/ })).toBeDefined()
   expect(await band.find({ text: / · 1 in a row/ })).toBeDefined()
+  // Once the response says: the read, the 800 written and the 10 uncached, at $4/M.
+  expect(await band.find({ text: / · prompt \$0\.03 · / })).toBeDefined()
   expect(world.sounds).toBe(1)
   const terminal = await $.ui.mount({ plugin: 'cache-clock', surface: 'terminal', ...BAND(true) })
   expect(await terminal.find({ key: 'reward-1060000' })).toBeUndefined()

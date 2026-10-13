@@ -31,7 +31,7 @@ If keep-warm is off, you get a toast (and a sound) about 5 minutes before the ca
 
 ### The reward
 
-A message **you typed** that reuses a warm cache plays a 4-second scene in the band, and `Saved $x` rolls up like an odometer beside it, with what you've saved today and how many warm returns in a row:
+A message **you typed** that reuses a warm cache plays a 4-second scene in the band, and `Saved $x` rolls up like an odometer beside it, with what the prompt itself cost, what you've saved today and how many warm returns in a row:
 
 | When | Scene |
 |---|---|
@@ -39,7 +39,7 @@ A message **you typed** that reuses a warm cache plays a 4-second scene in the b
 | Close call (under 5 minutes left) | Clawd sprints in and flips a nearly empty **hourglass**: `with 0:41 to spare` |
 | Milestone ($10, $25, $50 … saved today, or every 25 in a row) | Clawd plays the **guitar** |
 
-The saving is real: what reading the cache cost compared with writing it all again, at list price. Wake-ups from background work, scheduled prompts and other plugins' messages don't count. If the response shows the cache was missed after all, the scene is taken back and the run of warm returns ends. Under a cent, nothing plays.
+The saving is real: what reading the cache cost compared with writing it all again, at list price. `prompt $y` is what the message's prompt actually cost with the cache: `≈` the cache read until the first response reports its usage, then the exact figure (input only; the reply's output isn't counted). Wake-ups from background work, scheduled prompts and other plugins' messages don't count. If the response shows the cache was missed after all, the scene is taken back and the run of warm returns ends. Under a cent, nothing plays.
 
 ## Install
 

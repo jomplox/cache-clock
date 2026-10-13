@@ -51,6 +51,10 @@ export type Reward = {
   variant: RewardVariant
   /** What reading the cache saved against writing it again, at list price, USD. */
   saved: number
+  /** What the prompt itself cost, at list price, USD: until its response says, the cache read alone. */
+  paid: number
+  /** Whether `paid` is the response's own usage rather than the estimate. */
+  isPaidExact?: boolean
   /** Saved today across chats, this message included. */
   today: number
   /** Warm returns in a row across chats, this one included. */
