@@ -31,7 +31,7 @@ If keep-warm is off (or has spent its refreshes), you get a toast (and a sound) 
 
 ### Compact
 
-Turn on compacting for a chat (the **Compact** band button) and, about 2 minutes before the cache expires (1 minute for a 5-minute cache), the mod **compacts the chat while the cache is still warm**, so your next message writes only the summary instead of the whole history. With keep-warm on, that happens once its refreshes are spent; with it off, right away, for chats of 30k tokens or more (a smaller one costs about as much to summarize as to re-cache). The band says when it will: `· compacts with 2:00 left`. Sending a message first keeps the full history.
+Turn on compacting for a chat (the **Compact** band button) and, about 2 minutes before the cache expires (1 minute for a 5-minute cache), the mod **compacts the chat while the cache is still warm**, so your next message writes only the summary instead of the whole history. With keep-warm on, that happens once its refreshes are spent; with it off, right away, for chats of 30k tokens or more (a smaller one costs about as much to summarize as to re-cache). The expiry alert says it will. Sending a message first keeps the full history.
 
 ### The reward
 

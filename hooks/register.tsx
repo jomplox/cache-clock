@@ -1440,9 +1440,7 @@ export const register: Register = (on, options) => {
       const used =
         isOn && kw.refreshes > 0
           ? ` · refreshed ${kw.refreshes}/${Math.max(limit, kw.refreshes)}${kw.refreshes >= limit && !kw.stopped && isCompactOn ? ', compacts before it goes cold' : ''}`
-          : left !== null && willCompact(s, kw, info)
-            ? ` · compacts with ${clock(refreshLead(info.ttlMin))} left`
-            : ''
+          : ''
       const isHeld = isOn && !kw.stopped && kw.refreshes < limit
       const workText =
         work.count === 0 || e.props.isWorking ? null : left !== null && isHeld ? (

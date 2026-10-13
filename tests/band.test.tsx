@@ -243,13 +243,9 @@ test('with keep-warm off, compacting on compacts a big chat before it goes cold,
   await start($)
   await send($)
 
-  // The band says it will compact all along; so does the alert.
-  const early = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
-  expect(await early.find({ text: /compacts with 2:00 left/ })).toBeDefined()
+  // The alert says it will compact.
   await clock.advance(55.5 * 60_000)
   expect(world.toasts).toEqual([expect.stringMatching(/otherwise it compacts with 2:00 left$/)])
-  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
-  expect(await band.find({ text: /compacts with 2:00 left/ })).toBeDefined()
   expect(world.compactions).toBe(0)
 
   // Then it compacts, once, without refreshing.
