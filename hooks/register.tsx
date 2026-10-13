@@ -1438,8 +1438,8 @@ export const register: Register = (on, options) => {
       const used =
         isOn && kw.refreshes > 0
           ? ` · refreshed ${kw.refreshes}/${Math.max(limit, kw.refreshes)}${kw.refreshes >= limit && !kw.stopped ? ', compacts before it goes cold' : ''}`
-          : left !== null && left < alertLead(info.ttlMin) && willCompact(s, kw, info)
-            ? ' · compacts before it goes cold'
+          : left !== null && willCompact(s, kw, info)
+            ? ` · compacts with ${clock(refreshLead(info.ttlMin))} left`
             : ''
       const isHeld = isOn && !kw.stopped && kw.refreshes < limit
       const workText =
