@@ -540,10 +540,9 @@ async function chatLabel($: EngineInterface, path: string): Promise<string> {
 function clock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
   if (s <= 3600) return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  // Past an hour (only ever time gone by): hours, or days, without seconds.
   const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = String(s % 60).padStart(2, '0')
-  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`
+  return h < 24 ? `${h}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
 const kTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n))
@@ -891,18 +890,23 @@ async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise
   if (JSON.stringify(prev) !== JSON.stringify(list)) await update($, others, () => list)
 }
 
-// The main conversation's line, as one text so it never wraps in pieces;
-// `current` is the session's model since the last switch.
-function mainLine({ Text }: Pick<Elements['desktop'], 'Text'>, isWorking: boolean, info: CacheInfo, now: number, current: string | null) {
+// The main conversation's line: the status whole, the rest one clipped row
+// that gives way to the width before the buttons do; `current` is the
+// session's model since the last switch.
+function mainLine({ Box, Text }: Pick<Elements['desktop'], 'Box' | 'Text'>, isWorking: boolean, info: CacheInfo, now: number, current: string | null) {
   // What the next message pays to write the conversation again, at list price.
   const base = price(info.model ?? current).base
   const cost = info.tokens && base !== null ? `≈$${((info.tokens * base * writeMult(info.ttlMin)) / 1e6).toFixed(2)}` : null
-  const line = (color: 'green' | 'yellow' | 'red' | 'cyan', head: string, rest: string) => (
-    <Text>
+  const line = (color: 'green' | 'yellow' | 'red' | 'cyan', head: string, rest: string) => [
+    <Box key="main-head" flexShrink={0}>
       <Text color={color}>{head}</Text>
-      <Text dimColor>{rest}</Text>
-    </Text>
-  )
+    </Box>,
+    <Box key="main-rest" flexShrink={1} height={1} overflow="hidden" alignItems="flex-start">
+      <Text dimColor wrap="truncate-end">
+        {rest}
+      </Text>
+    </Box>,
+  ]
   const resend = info.tokens
     ? `next message re-caches ~${kTokens(info.tokens)} tokens${cost ? ` (${cost})` : ''}`
     : 'next message re-caches the conversation'
@@ -1471,7 +1475,7 @@ export const register: Register = (on, options) => {
           {isRewarding && Svg !== null && prize !== null ? (
             rewardLine({ Box, Text, Svg }, prize, now)
           ) : (
-            <Box flexShrink={0}>{mainLine({ Text }, e.props.isWorking, info, now, current)}</Box>
+            mainLine({ Box, Text }, e.props.isWorking, info, now, current)
           )}
           <Box flexShrink={0}>
             <Text dimColor>{used} </Text>
@@ -1486,13 +1490,14 @@ export const register: Register = (on, options) => {
               onPress={() => update($, showStats, () => !isStatsOn)}
             />
           </Box>
+          {/* The extras give way first, and clipped: squeezed to nothing, a text wraps a letter a row. */}
           {workText ? (
-            <Box flexShrink={1} overflow="hidden">
+            <Box flexShrink={1000} height={1} overflow="hidden" alignItems="flex-start">
               {workText}
             </Box>
           ) : null}
           {isSwapped || expiring ? (
-            <Box flexShrink={1} overflow="hidden">
+            <Box flexShrink={1000} height={1} overflow="hidden" alignItems="flex-start">
               <Text wrap="truncate-end">
                 {expiring ? <Text>{` · ${expiring.title} expires in ${clock(expiring.left)}`}</Text> : null}
                 {isSwapped ? (
