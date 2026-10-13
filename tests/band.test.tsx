@@ -37,6 +37,8 @@ function engine(on: On) {
     store: new Map<string, unknown>(),
     transcript: '',
     stats: '',
+    spend: '',
+    rateLimits: [] as { kind: string; percentUsed: number; resetsAt?: string }[],
     stopReason: 'end_turn' as string | null,
     agents: [] as { id: string; description: string; type: string; status: string }[],
   }
@@ -63,7 +65,11 @@ function engine(on: On) {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'self' }))
   on('session.cwd', () => ({ value: '/work/innomed-erp' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: {} as any, rateLimits: world.rateLimits } }))
   on('process.run', (_$, e) => {
+    if (e.argv.join(' ').includes('--argjson since')) {
+      return { value: { exitCode: 0, stdout: world.spend, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv.join(' ').includes('jq ')) {
       return { value: { exitCode: 0, stdout: world.stats, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -480,6 +486,8 @@ test('the band shows cache stats under this chat, and a wide band two subagents 
   expect(await lone.find({ text: /re-caching 127k/ })).toBeDefined()
   expect(await lone.find({ text: /^ \d+% · 1 rebuild$/ })).toBeDefined()
   expect(await lone.find({ text: /typically 4m · 1 over 1h/ })).toBeDefined()
+  // Nothing spent shows no spend line.
+  expect(await lone.find({ text: /at list price/ })).toBeUndefined()
 
   // The band's stats button switches them off for this chat, and back on.
   await lone.press({ key: 'stats-toggle' })
@@ -681,4 +689,30 @@ test('without keep-warm a running workflow turns amber near expiry; its run stat
   const low = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
   expect(await low.find({ text: /still running; the cache expires first unless kept warm/ })).toBeDefined()
   expect(world.toasts[0]).toMatch(/while workflow mint-animation is still running/)
+})
+
+test("the stats show what this chat and its subagents spent today and this week, at list price", async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000_000 })
+  const world = engine(on)
+  world.transcript = '/p/self.jsonl'
+  // This week: main 1M read, 10k out ($0.40); subagents 2M read, 100k 5m
+  // writes ($0.90), today. Today but before the window: main again ($0.40).
+  world.spend = [
+    'claude-opus-5-5\tfalse\ttrue\tfalse\t0\t1000000\t0\t0\t10000',
+    'claude-opus-5-5\ttrue\ttrue\ttrue\t0\t2000000\t100000\t0\t0',
+    'claude-opus-5-5\tfalse\tfalse\ttrue\t0\t1000000\t0\t0\t10000',
+  ].join('\n')
+  await start($)
+  world.stepUsage.push(usage(127_000, 0))
+  await send($)
+  await clock.advance(10_000)
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: ' ≈$1.30 today · ≈$1.30 in 7 days ($0.90 subagents), at list price' })).toBeDefined()
+
+  // With a weekly rate-limit window it counts from that window's start.
+  world.rateLimits = [{ kind: 'seven_day', percentUsed: 36, resetsAt: new Date(10_000_000 + 86_400_000).toISOString() }]
+  await start($)
+  await clock.advance(10_000)
+  const later = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await later.find({ text: /≈\$1\.30 this week/ })).toBeDefined()
 })

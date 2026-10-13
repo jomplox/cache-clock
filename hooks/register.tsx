@@ -74,6 +74,8 @@ type Flags = {
   listed: Set<string> | null
   /** This chat's cache record from its transcript; null until read. */
   stats: ChatStats | null
+  /** What this chat and its subagents spent this week; null until read. */
+  spend: ChatSpend | null
   statsAt: number
   /** Keep-warm refreshes that failed in a row. */
   failures: number
@@ -123,6 +125,67 @@ jq -Rr 'def ts: .timestamp | sub("\\\\.[0-9]+Z$"; "Z") | fromdateiso8601;
     ["", ts, "U"] | @tsv
   else empty end' |
 awk -F'\t' '$1 == "" || !seen[$1]++ { print $2 "\t" $3 "\t" $4 "\t" $5 }'`
+
+// What this chat and its subagents spent since a time ($1, the week) and since
+// local midnight: tokens per model, main and subagent apart, in the week and
+// today ("model, isSidechain, isWeek, isToday, input, read, 5m write, 1h
+// write, output"). Only transcripts written since the earlier of the two are
+// read; a response's rows repeat its usage, the last with the full output.
+const SPEND_SCRIPT = `PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin
+day=$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%Y-%m-%d) 00:00:00" +%s) || exit 1
+from=$1; [ "$day" -lt "$from" ] && from=$day
+ref=$(mktemp) || exit 1; trap 'rm -f "$ref"' EXIT
+touch -t "$(date -r "$from" +%Y%m%d%H%M.%S)" "$ref"
+find "$2" "\${2%.jsonl}/subagents" -name '*.jsonl' -newer "$ref" 2>/dev/null | tr '\\n' '\\0' |
+xargs -0 grep -h '"cache_read_input_tokens"' 2>/dev/null |
+jq -Rr --argjson since "$1" --argjson day "$day" --argjson from "$from" 'fromjson? | select(.type == "assistant" and .message.usage and .message.model != "<synthetic>")
+  | (.timestamp | sub("\\\\.[0-9]+Z$"; "Z") | fromdateiso8601) as $t | select($t >= $from)
+  | .message.usage as $u | ($u.cache_creation.ephemeral_1h_input_tokens // 0) as $h
+  | [(.message.id // .requestId // ""), .message.model, (.isSidechain // false), ($t >= $since), ($t >= $day), ($u.input_tokens // 0), ($u.cache_read_input_tokens // 0),
+     ($u.cache_creation.ephemeral_5m_input_tokens // (($u.cache_creation_input_tokens // 0) - $h)), $h, ($u.output_tokens // 0)] | @tsv' |
+awk -F'\\t' '{ if (!($1 in out) || $10 > out[$1]) { out[$1] = $10; row[$1] = $2 "\\t" $3 "\\t" $4 "\\t" $5 "\\t" $6 "\\t" $7 "\\t" $8 "\\t" $9 } }
+  END { for (id in row) { split(row[id], f, "\\t"); k = f[1] "\\t" f[2] "\\t" f[3] "\\t" f[4]; i[k] += f[5]; r[k] += f[6]; w5[k] += f[7]; w1[k] += f[8]; o[k] += out[id] }
+        for (k in i) print k "\\t" i[k] "\\t" r[k] "\\t" w5[k] "\\t" w1[k] "\\t" o[k] }'`
+
+type ChatSpend = {
+  /** Since when: the weekly rate-limit window's start, else 7 days back. */
+  since: number
+  isWindow: boolean
+  /** At list prices, in dollars: the week, its subagents' share, and today. */
+  total: number
+  subagents: number
+  today: number
+}
+
+// Output is priced at 5× base input, as on every current model.
+function parseSpend(stdout: string, since: number, isWindow: boolean): ChatSpend {
+  const spend: ChatSpend = { since, isWindow, total: 0, subagents: 0, today: 0 }
+  for (const line of stdout.split('\n')) {
+    const [model, isSub, isWeek, isToday, ...counts] = line.split('\t')
+    const [input, hit, w5, w1, output] = counts.map(Number)
+    const p = price(model)
+    if (p.base === null) continue
+    const usd = (p.base * ((input || 0) + (hit || 0) * p.read + (w5 || 0) * 1.25 + (w1 || 0) * 2 + (output || 0) * 5)) / 1e6
+    if (isToday === 'true') spend.today += usd
+    if (isWeek !== 'true') continue
+    spend.total += usd
+    if (isSub === 'true') spend.subagents += usd
+  }
+  return spend
+}
+
+const WEEK = 7 * 24 * 60 * 60_000
+
+async function refreshSpend($: EngineInterface, flags: Flags, now: number): Promise<void> {
+  const usage = await $.session.usage().catch(() => null)
+  const resets = Date.parse(usage?.rateLimits.find(r => r.kind === 'seven_day')?.resetsAt ?? '')
+  const isWindow = Number.isFinite(resets)
+  const since = isWindow ? resets - WEEK : now - WEEK
+  const out = await $.process.run(['/bin/sh', '-c', SPEND_SCRIPT, 'sh', String(Math.floor(since / 1000)), flags.transcript]).catch(() => null)
+  if (out && out.exitCode === 0 && !out.isStdoutTruncated) flags.spend = parseSpend(out.stdout, since, isWindow)
+}
+
+const usd = (n: number) => `$${n.toFixed(n >= 100 ? 0 : 2)}`
 
 // Stats are read again at most this often: a long transcript takes seconds.
 const STATS_EVERY = 5 * 60_000
@@ -174,6 +237,7 @@ async function refreshStats($: EngineInterface, flags: Flags, isForced = false):
   flags.statsAt = now
   const out = await $.process.run(['/bin/sh', '-c', STATS_SCRIPT, 'sh', flags.transcript]).catch(() => null)
   if (out && out.exitCode === 0 && !out.isStdoutTruncated) flags.stats = parseStats(out.stdout) ?? flags.stats
+  await refreshSpend($, flags, now).catch(() => {})
 }
 
 // API list prices, for the stats' comparisons: base input $/MTok and what a
@@ -412,7 +476,7 @@ function readsCaption(stats: ChatStats): string {
 // The band's second row, most useful first: what losing the cache would
 // cost, what keep-warm paid to keep it, how the cache has done in this chat,
 // and how the person's pauses compare with its TTL.
-function statLines(info: CacheInfo | null, current: string | null, kw: KeepWarm, stats: ChatStats | null, now: number) {
+function statLines(info: CacheInfo | null, current: string | null, kw: KeepWarm, stats: ChatStats | null, spend: ChatSpend | null, now: number) {
   const lines: { key: string; label: string; value: string }[] = []
   const ttlMin = info?.ttlMin ?? DEFAULT_TTL
   const p = price(info?.model ?? current)
@@ -449,6 +513,14 @@ function statLines(info: CacheInfo | null, current: string | null, kw: KeepWarm,
         value: ` typically ${duration(median)} · ${over} over ${ttlMin === 60 ? '1h' : '5m'}`,
       })
     }
+  }
+  if (spend && (spend.total >= 0.01 || spend.today >= 0.01)) {
+    const subs = spend.subagents >= 0.01 ? ` (${usd(spend.subagents)} subagents)` : ''
+    lines.push({
+      key: 'spend',
+      label: 'Spent',
+      value: ` ≈${usd(spend.today)} today · ≈${usd(spend.total)} ${spend.isWindow ? 'this week' : 'in 7 days'}${subs}, at list price`,
+    })
   }
   return lines
 }
@@ -968,8 +1040,8 @@ function rewardLine({ Box, Text, Svg }: Pick<Elements['desktop'], 'Box' | 'Text'
     <Box key="reward-odo" flexShrink={0}>
       <Svg key={`reward-odo-${r.at}`} source={odo.source} alt={`$${r.saved.toFixed(2)}`} height={20} />
     </Box>,
-    <Box key="reward-tail" flexShrink={0}>
-      <Text>
+    <Box key="reward-tail" flexShrink={1} height={1} overflow="hidden" alignItems="flex-start">
+      <Text wrap="truncate-end">
         <Text dimColor>{`${r.spare !== undefined ? ` with ${clock(r.spare)} to spare` : ''} · prompt ${r.isPaidExact ? '' : '≈'}$${r.paid.toFixed(2)} · `}</Text>
         {r.milestone ? <Text bold color={GOLD}>{r.milestone}</Text> : <Text dimColor>{`$${r.today.toFixed(2)} today`}</Text>}
         {isStreakMilestone ? null : <Text dimColor>{` · ${r.streak} in a row`}</Text>}
@@ -1000,7 +1072,7 @@ function otherChatsShown(
 
 export const register: Register = (on, options) => {
   const s = settings(options)
-  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null }
+  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null }
 
   // Also runs on a mod (re)load inside an open chat: seed from its transcript so
   // the band shows before the next message.
@@ -1416,12 +1488,12 @@ export const register: Register = (on, options) => {
     const isRewarding = Svg !== null && e.surface !== 'terminal' && prize !== null && now - prize.at >= 0 && now - prize.at < REWARD_MS
     const mint = await read($, minted)
     const isMinting = !isRewarding && Svg !== null && e.surface !== 'terminal' && mint !== null && now - mint.at >= 0 && now - mint.at < MINT_MS
-    const allStats = isStatsOn ? statLines(info, current, kw, flags.stats, now) : []
+    const allStats = isStatsOn ? statLines(info, current, kw, flags.stats, flags.spend, now) : []
     // Where the surface draws SVG, this chat's history goes to charts, each
     // captioned with its stat line; the text row keeps what has no chart.
     const charted = Svg !== null && flags.stats !== null && flags.stats.requests.length > 1
     const caption = (key: string) => allStats.find(l => l.key === key)
-    const stats = charted ? allStats.filter(l => l.key === 'cold' || l.key === 'payoff') : allStats
+    const stats = charted ? allStats.filter(l => l.key === 'cold' || l.key === 'payoff' || l.key === 'spend') : allStats
     const statText =
       stats.length > 0 ? (
         <Text key="stats" wrap="truncate-end">
@@ -1511,9 +1583,9 @@ export const register: Register = (on, options) => {
             mainLine({ Box, Text }, e.props.isWorking, info, now, current)
           )}
           <Box flexShrink={0}>
-            <Text dimColor>{used} </Text>
+            <Text dimColor>{used}</Text>
           </Box>
-          <Box flexShrink={0}>
+          <Box flexShrink={0} marginLeft={2}>
             <Button key="keep-warm" label={isOn ? 'Keep-warm: on' : 'Keep-warm: off'} onPress={() => setKeepWarm($, !isOn)} />
           </Box>
           <Box flexShrink={0} marginLeft={1}>

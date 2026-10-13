@@ -20,7 +20,7 @@ Claude Code caches your conversation so each new message only pays full price fo
 - **A new cache.** When a message writes a new cache, an LED panel lights up across the band and breaks away.
 - **A miss.** If a message expected to read the cache didn't, the band says so.
 - **Other chats.** How long each of your other chats' caches has left, and which one expires next.
-- **Stats** (toggle in the band). What going cold would cost compared with reading the cache warm, how much of this chat was read from cache, how often it was rebuilt, and charts of both.
+- **Stats** (toggle in the band). What going cold would cost compared with reading the cache warm, how much of this chat was read from cache, how often it was rebuilt, and charts of both. And what this chat and its subagents spent today and this week (your plan's weekly window, else the last 7 days), at list price.
 - **Subagents and workflows.** Their caches, and what a running workflow has read from cache.
 
 ### Keep-warm
