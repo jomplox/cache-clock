@@ -1,0 +1,67 @@
+{
+  "name": "cache-clock",
+  "version": "0.15.1",
+  "description": "Shows how long this conversation's prompt cache stays warm",
+  "author": {
+    "name": "Jose Vega",
+    "url": "https://github.com/jomplox"
+  },
+  "homepage": "https://github.com/jomplox/cache-clock",
+  "repository": "https://github.com/jomplox/cache-clock",
+  "license": "Apache-2.0",
+  "keywords": [
+    "prompt-cache",
+    "cache",
+    "desktop",
+    "mod"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "keepWarm": {
+      "type": "boolean",
+      "title": "Keep warm by default",
+      "description": "New chats start with keep-warm on: shortly before the cache expires, one small request reads it and resets its timer. Each chat can switch it with its band button or /keep-warm.",
+      "default": false
+    },
+    "keepWarmMax": {
+      "type": "number",
+      "title": "Keep-warm refreshes per idle stretch",
+      "description": "How many refreshes keep-warm sends after your last message (each 1h refresh holds it about an hour longer); when they are spent, it compacts the chat instead, while the cache is still warm. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that costs less than re-caching the chat.",
+      "default": 3
+    },
+    "alert": {
+      "type": "string",
+      "title": "Expiry alert",
+      "description": "What happens when about 5 minutes of cache time are left (1 minute for a 5m cache) and keep-warm is off.",
+      "default": "toast+sound",
+      "options": [
+        "toast+sound",
+        "toast",
+        "off"
+      ]
+    },
+    "otherChats": {
+      "type": "boolean",
+      "title": "Show other chats",
+      "description": "List the caches of your other chats in the band.",
+      "default": true
+    },
+    "reward": {
+      "type": "string",
+      "title": "Warm-cache reward",
+      "description": "When a message you send reuses the warm cache, a little Clawd celebrates what it saved in the band, with sound: a prop on most messages, an hourglass flip on a close call, the guitar on a milestone.",
+      "default": "animation+sound",
+      "options": [
+        "animation+sound",
+        "animation",
+        "off"
+      ]
+    },
+    "stats": {
+      "type": "boolean",
+      "title": "Show cache stats",
+      "description": "New chats show the cache stats box under the cache line. Each chat can switch it with its band button.",
+      "default": true
+    }
+  }
+}

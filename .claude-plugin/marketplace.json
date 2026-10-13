@@ -1,0 +1,6 @@
+{
+  "name": "cache-clock",
+  "owner": { "name": "Jose Vega", "url": "https://github.com/jomplox" },
+  "metadata": { "description": "cache-clock, a Claude Code mod: a countdown for each chat's prompt cache" },
+  "plugins": [{ "name": "cache-clock", "source": "./", "description": "A countdown for the prompt cache of each Claude Code chat, with keep-warm and a little reward when you reuse it" }]
+}

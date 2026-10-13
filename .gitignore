@@ -1,0 +1,7 @@
+# Written by the engine when it loads the mod (API types for the editor).
+.claude-plugin/types/
+node_modules/
+.DS_Store
+# Local design previews.
+/cache-reward-preview.html
+/mint-*.png
