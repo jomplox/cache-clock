@@ -194,7 +194,7 @@ test('a model switch reads cold until switched back', async ($, on) => {
   expect(await back.find({ text: /Cache warm/ })).toBeDefined()
 })
 
-test('keep-warm refreshes before expiry, up to its limit, then compacts', { options: { keepWarm: true, keepWarmMax: 2 }, timeoutMs: 15_000 }, async ($, on) => {
+test('keep-warm refreshes before expiry, up to its limit, then compacts', { options: { keepWarm: true, keepWarmMax: 2, autoCompact: true }, timeoutMs: 15_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
   await start($)
@@ -236,7 +236,7 @@ test('keep-warm refreshes before expiry, up to its limit, then compacts', { opti
   expect(await after.find({ text: /refreshed/ })).toBeUndefined()
 })
 
-test('with keep-warm off, compactWhenOff compacts a big chat before it goes cold, a small one not', { options: { keepWarm: false, compactWhenOff: true }, timeoutMs: 15_000 }, async ($, on) => {
+test('with keep-warm off, compacting on compacts a big chat before it goes cold, a small one not', { options: { keepWarm: false, autoCompact: true }, timeoutMs: 15_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
   world.stepUsage.push(usage(0, 100_000), usage(0, 10_000))
@@ -264,6 +264,29 @@ test('with keep-warm off, compactWhenOff compacts a big chat before it goes cold
   await send($)
   await clock.advance(70 * 60_000)
   expect(world.compactions).toBe(1)
+})
+
+test('keep-warm with compacting off lets a spent cache go cold with the alert; the band button turns compacting on', { options: { keepWarm: true, keepWarmMax: 1 }, timeoutMs: 15_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  world.stepUsage.push(usage(0, 100_000))
+  await start($)
+  await send($)
+  await clock.advance(59 * 60_000)
+  expect(world.forks).toBe(1)
+
+  // Spent: the alert comes, nothing compacts.
+  await clock.advance(55 * 60_000)
+  expect(world.compactions).toBe(0)
+  expect(world.toasts).toEqual([expect.stringMatching(/expires in \d:\d\d: send a message to keep it$/)])
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: /Compact: off/ })).toBeDefined()
+
+  // Switched on for this chat: it compacts before the cache goes cold.
+  await band.press({ key: 'compact-toggle' })
+  await clock.advance(3 * 60_000)
+  expect(world.compactions).toBe(1)
+  expect(world.forks).toBe(1)
 })
 
 test('keep-warm stops itself when a refresh reads little from cache', { options: { keepWarm: true }, timeoutMs: 15_000 }, async ($, on) => {
@@ -591,7 +614,7 @@ test('a reward goes into the totals as another chat left them; no response takes
 const WORKFLOW = { status: 'async_launched', taskId: 'task-wf', workflowName: 'mint-animation', runId: 'wf_1' }
 const RUNNING = [{ id: 'task-wf', type: 'workflow', status: 'running', description: 'mint', name: 'mint-animation' }]
 
-test('keep-warm holds the cache while a workflow runs, then goes back to its limit', { options: { keepWarm: true, keepWarmMax: 1 }, timeoutMs: 15_000 }, async ($, on) => {
+test('keep-warm holds the cache while a workflow runs, then goes back to its limit', { options: { keepWarm: true, keepWarmMax: 1, autoCompact: true }, timeoutMs: 15_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
   on('tool.call', () => ({ result: WORKFLOW as any }))

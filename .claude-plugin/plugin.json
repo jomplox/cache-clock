@@ -1,6 +1,6 @@
 {
   "name": "cache-clock",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "description": "For the Claude Desktop app's Code tab: shows how long each chat's prompt cache stays warm",
   "author": {
     "name": "Jose Vega",
@@ -26,13 +26,13 @@
     "keepWarmMax": {
       "type": "number",
       "title": "Keep-warm refreshes per idle stretch",
-      "description": "How many refreshes keep-warm sends after your last message (each 1h refresh holds it about an hour longer); when they are spent, it compacts the chat instead, while the cache is still warm. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that costs less than re-caching the chat.",
+      "description": "How many refreshes keep-warm sends after your last message (each 1h refresh holds it about an hour longer); when they are spent, it compacts the chat if compacting is on, or lets it go cold with the expiry alert. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that costs less than re-caching the chat.",
       "default": 3
     },
-    "compactWhenOff": {
+    "autoCompact": {
       "type": "boolean",
-      "title": "Compact before it goes cold (keep-warm off)",
-      "description": "With keep-warm off, compact the chat about 2 minutes before its cache expires (1 minute for a 5m cache), while it is still warm, so your next message writes only the summary instead of the whole history. Chats under 30k tokens are left alone. Sending a message before then keeps the full history.",
+      "title": "Compact before it goes cold",
+      "description": "New chats start with compacting on: shortly before the cache expires (2 minutes before, 1 for a 5m cache), while it is still warm, the chat is compacted, so your next message writes only the summary instead of the whole history. With keep-warm on, that happens once its refreshes are spent; with it off, right away (chats under 30k tokens are left alone). Each chat can switch it with its band button.",
       "default": false
     },
     "alert": {

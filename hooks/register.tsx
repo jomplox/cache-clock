@@ -47,13 +47,13 @@ const alertLead = (ttlMin: number) => Math.min(5, ttlMin / 5) * 60_000
 // summary would cost about what writing it again does.
 const COMPACT_MIN = 30_000
 
-type Settings = { keepWarm: boolean; keepWarmMax: number; compactWhenOff: boolean; alert: string; otherChats: boolean; stats: boolean; reward: string }
+type Settings = { keepWarm: boolean; keepWarmMax: number; compact: boolean; alert: string; otherChats: boolean; stats: boolean; reward: string }
 
 function settings(options: PluginOptions): Settings {
   return {
     keepWarm: options.keepWarm === true,
     keepWarmMax: typeof options.keepWarmMax === 'number' ? Math.max(0, options.keepWarmMax) : 3,
-    compactWhenOff: options.compactWhenOff === true,
+    compact: options.autoCompact === true,
     alert: typeof options.alert === 'string' ? options.alert : 'toast+sound',
     otherChats: options.otherChats !== false,
     stats: options.stats !== false,
@@ -671,7 +671,7 @@ const keepLabel = (prev: AgentCache | undefined, label: string) =>
   prev?.label && prev.label !== 'subagent' && !(prev.label.endsWith('…') && label.length > prev.label.length) ? prev.label : label
 
 async function setKeepWarm($: EngineInterface, isOn: boolean): Promise<void> {
-  await update($, keepWarm, () => ({ isOn, refreshes: 0 }))
+  await update($, keepWarm, kw => ({ isOn, isCompactOn: kw.isCompactOn, refreshes: 0 }))
 }
 
 // One tool-less request over the conversation that reads its cache, which
@@ -804,14 +804,14 @@ async function maybeRefresh($: EngineInterface, s: Settings, flags: Flags): Prom
   await refresh($, flags, sentAt)
 }
 
-// Once keep-warm has spent its refreshes (or, with it off, when the
-// `compactWhenOff` option asks), the conversation is compacted at the point
-// it would have refreshed again: the compaction reads the history while it
-// is still cached, and the next message writes only the summary.
+// With compacting on, the conversation is compacted at the point keep-warm
+// would refresh: once its refreshes are spent, or with keep-warm off, right
+// away. The compaction reads the history while it is still cached, and the
+// next message writes only the summary.
 async function maybeCompact($: EngineInterface, s: Settings, flags: Flags): Promise<void> {
   const kw = await read($, keepWarm)
   const isOn = kw.isOn ?? s.keepWarm
-  if (!(isOn || s.compactWhenOff) || kw.stopped || flags.isRunning || flags.isForking) return
+  if (!(kw.isCompactOn ?? s.compact) || kw.stopped || flags.isRunning || flags.isForking) return
   const info = await read($, cache)
   const now = await $.clock.now()
   const left = liveLeft(info, await read($, model), now)
@@ -850,7 +850,8 @@ async function maybeCompact($: EngineInterface, s: Settings, flags: Flags): Prom
 }
 
 // A toast (and a sound) when the cache is about to expire and keep-warm is
-// off or paused (on, it refreshes or compacts); once per cache entry.
+// off, paused, or spent with compacting off (else it refreshes or compacts);
+// once per cache entry.
 async function maybeAlert($: EngineInterface, s: Settings, flags: Flags): Promise<void> {
   if (s.alert === 'off' || flags.isRunning) return
   const info = await read($, cache)
@@ -858,8 +859,8 @@ async function maybeAlert($: EngineInterface, s: Settings, flags: Flags): Promis
   if (info === null || left === null || left > alertLead(info.ttlMin)) return
   if ((await read($, alertedAt)) === info.at) return
   const kw = await read($, keepWarm)
-  if ((kw.isOn ?? s.keepWarm) && !kw.stopped) return
   const work = await pendingWork($, flags, await $.clock.now())
+  if ((kw.isOn ?? s.keepWarm) && !kw.stopped && ((kw.isCompactOn ?? s.compact) || kw.refreshes < refreshLimit(s, info.ttlMin, info.model, work.count > 0))) return
 
   await update($, alertedAt, () => info.at)
   const name = flags.label ? `"${short(flags.label, 40)}"` : 'this chat'
@@ -871,7 +872,7 @@ async function maybeAlert($: EngineInterface, s: Settings, flags: Flags): Promis
 }
 
 // With keep-warm off, whether the chat will be compacted before it goes cold.
-const willCompact = (s: Settings, kw: KeepWarm, info: CacheInfo) => !(kw.isOn ?? s.keepWarm) && s.compactWhenOff && !kw.stopped && (info.tokens ?? 0) >= COMPACT_MIN
+const willCompact = (s: Settings, kw: KeepWarm, info: CacheInfo) => !(kw.isOn ?? s.keepWarm) && (kw.isCompactOn ?? s.compact) && !kw.stopped && (info.tokens ?? 0) >= COMPACT_MIN
 
 // Publishes this chat's cache for the other chats' bands and reads theirs.
 async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise<void> {
@@ -1185,7 +1186,7 @@ export const register: Register = (on, options) => {
     const expected = e.index === 0 && prev !== null && liveLeft(prev, bare(e.model), at) !== null ? prev.tokens : undefined
     await update($, cache, p => ({ at, ttlMin: p?.ttlMin ?? DEFAULT_TTL, model: bare(e.model), tokens: p?.tokens }))
     await update($, model, () => bare(e.model))
-    if (e.index === 0) await update($, keepWarm, kw => ({ isOn: kw.isOn, refreshes: 0 }))
+    if (e.index === 0) await update($, keepWarm, kw => ({ isOn: kw.isOn, isCompactOn: kw.isCompactOn, refreshes: 0 }))
     // A turn opening with no warm cache will write a new one: mint now, as the
     // person sends, rather than when the first response ends.
     const isColdStart = e.index === 0 && expected === undefined
@@ -1430,6 +1431,7 @@ export const register: Register = (on, options) => {
 
     if (info !== null) {
       const isOn = kw.isOn ?? s.keepWarm
+      const isCompactOn = kw.isCompactOn ?? s.compact
       const work = await pendingWork($, flags, now)
       const limit = refreshLimit(s, info.ttlMin, info.model, work.count > 0)
       // While the chat waits on background work: whether keep-warm holds the
@@ -1437,7 +1439,7 @@ export const register: Register = (on, options) => {
       const left = liveLeft(info, current, now)
       const used =
         isOn && kw.refreshes > 0
-          ? ` · refreshed ${kw.refreshes}/${Math.max(limit, kw.refreshes)}${kw.refreshes >= limit && !kw.stopped ? ', compacts before it goes cold' : ''}`
+          ? ` · refreshed ${kw.refreshes}/${Math.max(limit, kw.refreshes)}${kw.refreshes >= limit && !kw.stopped && isCompactOn ? ', compacts before it goes cold' : ''}`
           : left !== null && willCompact(s, kw, info)
             ? ` · compacts with ${clock(refreshLead(info.ttlMin))} left`
             : ''
@@ -1510,6 +1512,13 @@ export const register: Register = (on, options) => {
           </Box>
           <Box flexShrink={0}>
             <Button key="keep-warm" label={isOn ? 'Keep-warm: on' : 'Keep-warm: off'} onPress={() => setKeepWarm($, !isOn)} />
+          </Box>
+          <Box flexShrink={0} marginLeft={1}>
+            <Button
+              key="compact-toggle"
+              label={isCompactOn ? 'Compact: on' : 'Compact: off'}
+              onPress={() => update($, keepWarm, prev => ({ ...prev, isCompactOn: !isCompactOn }))}
+            />
           </Box>
           <Box flexShrink={0} marginLeft={1}>
             <Button
