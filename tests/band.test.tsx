@@ -236,6 +236,34 @@ test('keep-warm refreshes before expiry, up to its limit, then compacts', { opti
   expect(await after.find({ text: /refreshed/ })).toBeUndefined()
 })
 
+test('with keep-warm off, compactWhenOff compacts a big chat before it goes cold, a small one not', { options: { keepWarm: false, compactWhenOff: true }, timeoutMs: 15_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  world.stepUsage.push(usage(0, 100_000), usage(0, 10_000))
+  await start($)
+  await send($)
+
+  // The alert says it will compact; the band says so too.
+  await clock.advance(55.5 * 60_000)
+  expect(world.toasts).toEqual([expect.stringMatching(/otherwise it compacts with 2:00 left$/)])
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: /compacts before it goes cold/ })).toBeDefined()
+  expect(world.compactions).toBe(0)
+
+  // Then it compacts, once, without refreshing.
+  await clock.advance(3 * 60_000)
+  expect(world.compactions).toBe(1)
+  expect(world.forks).toBe(0)
+  expect(world.toasts[1]).toMatch(/^Compacted .* before its cache went cold$/)
+  await clock.advance(10 * 60_000)
+  expect(world.compactions).toBe(1)
+
+  // A small chat is left to go cold.
+  await send($)
+  await clock.advance(70 * 60_000)
+  expect(world.compactions).toBe(1)
+})
+
 test('keep-warm stops itself when a refresh reads little from cache', { options: { keepWarm: true }, timeoutMs: 15_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
@@ -266,6 +294,7 @@ test('keep-warm switched off by option, then on per chat', { options: { keepWarm
   await clock.advance(59 * 60_000)
   expect(world.forks).toBe(0)
   expect(world.toasts.length).toBe(1)
+  expect(world.compactions).toBe(0)
 
   const out = await $.command.run({ command: 'keep-warm', args: 'on' })
   expect(out.text).toMatch(/Keep-warm on/)

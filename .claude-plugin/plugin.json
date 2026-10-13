@@ -1,6 +1,6 @@
 {
   "name": "cache-clock",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "For the Claude Desktop app's Code tab: shows how long each chat's prompt cache stays warm",
   "author": {
     "name": "Jose Vega",
@@ -28,6 +28,12 @@
       "title": "Keep-warm refreshes per idle stretch",
       "description": "How many refreshes keep-warm sends after your last message (each 1h refresh holds it about an hour longer); when they are spent, it compacts the chat instead, while the cache is still warm. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that costs less than re-caching the chat.",
       "default": 3
+    },
+    "compactWhenOff": {
+      "type": "boolean",
+      "title": "Compact before it goes cold (keep-warm off)",
+      "description": "With keep-warm off, compact the chat about 2 minutes before its cache expires (1 minute for a 5m cache), while it is still warm, so your next message writes only the summary instead of the whole history. Chats under 30k tokens are left alone. Sending a message before then keeps the full history.",
+      "default": false
     },
     "alert": {
       "type": "string",

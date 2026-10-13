@@ -27,7 +27,7 @@ Claude Code caches your conversation so each new message only pays full price fo
 
 Turn on keep-warm for a chat (band button, or `/keep-warm on`) and, shortly before the cache expires, the mod sends one small request that reads it and resets its timer. That costs a cache read, about a twentieth of re-writing it. After a set number of refreshes (3 by default), it **compacts the chat while the cache is still warm**, so your next message writes only the summary instead of the whole history. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that's cheaper than re-caching.
 
-If keep-warm is off, you get a toast (and a sound) about 5 minutes before the cache expires (1 minute for a 5-minute cache).
+If keep-warm is off, you get a toast (and a sound) about 5 minutes before the cache expires (1 minute for a 5-minute cache). With the **Compact before it goes cold** option on, a chat of 30k tokens or more is then compacted about 2 minutes before expiry (1 minute for a 5-minute cache), without any refreshes, unless you send a message first.
 
 ### The reward
 
@@ -56,12 +56,13 @@ Requirements: the Claude Desktop app on macOS (sounds play through `afplay`), an
 
 ## Settings
 
-Asked when you install. To change one later, from a terminal: `echo '{"reward":"animation"}' | claude plugin configure cache-clock --values-stdin` (keys: `keepWarm`, `keepWarmMax`, `alert`, `otherChats`, `reward`, `stats`), then `/reload-plugins` in Desktop.
+Asked when you install. To change one later, from a terminal: `echo '{"reward":"animation"}' | claude plugin configure cache-clock@cache-clock --values-stdin` (keys: `keepWarm`, `keepWarmMax`, `compactWhenOff`, `alert`, `otherChats`, `reward`, `stats`), then `/reload-plugins` in Desktop.
 
 | Setting | Default | |
 |---|---|---|
 | Keep warm by default | off | New chats start with keep-warm on |
 | Keep-warm refreshes per idle stretch | 3 | Refreshes after your last message before it compacts instead |
+| Compact before it goes cold (keep-warm off) | off | With keep-warm off, compact a chat of 30k+ tokens shortly before its cache expires, while still warm |
 | Expiry alert | toast+sound | `toast+sound`, `toast` or `off`, when keep-warm is off |
 | Show other chats | on | List your other chats' caches in the band |
 | Warm-cache reward | animation+sound | `animation+sound`, `animation` or `off` |
