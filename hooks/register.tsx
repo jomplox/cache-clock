@@ -831,7 +831,12 @@ async function maybeCompact($: EngineInterface, s: Settings, flags: Flags): Prom
   flags.isForking = true
   let outcome: string
   try {
-    const r = await $.session.compact()
+    // Where the engine compacts only inside a turn (Desktop, any SDK host),
+    // it is refused: run `/compact` instead, as the person would.
+    const r: { skip?: string } = await $.session.compact().catch(async () => {
+      await $.command.run({ command: 'compact' })
+      return {}
+    })
     outcome = r.skip !== undefined ? `compaction skipped (${r.skip})` : `compacted ${why}`
     if (r.skip === undefined) {
       await update($, cache, prev => ({ at: now, ttlMin: prev?.ttlMin ?? info.ttlMin, model: prev?.model, isCompacted: true }))

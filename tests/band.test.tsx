@@ -30,6 +30,8 @@ function engine(on: On) {
     fork: { isAnswered: true, text: 'ok', usage: usage(100_000, 0) } as any,
     forks: 0,
     compactions: 0,
+    isHeadless: false,
+    compactCommands: 0,
     toasts: [] as string[],
     sounds: 0,
     store: new Map<string, unknown>(),
@@ -44,6 +46,7 @@ function engine(on: On) {
   })
   on('classic.PostCompact', () => ({}))
   on('session.compact', () => {
+    if (world.isHeadless) throw new Error('not available in a headless (-p / SDK) session yet')
     world.compactions += 1
     return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
   })
@@ -68,6 +71,10 @@ function engine(on: On) {
     return { value: { exitCode: found ? 0 : 1, stdout: found ? `${world.transcript}\n` : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('command.run', { command: 'compact' }, () => {
+    world.compactCommands += 1
+    return { text: 'Compacted' }
+  })
   on('model.fork', () => {
     world.forks += 1
     return { value: world.fork }
@@ -255,6 +262,16 @@ test('with keep-warm off, compacting on compacts a big chat before it goes cold,
   expect(world.toasts[1]).toMatch(/^Compacted .* before its cache went cold$/)
   await clock.advance(10 * 60_000)
   expect(world.compactions).toBe(1)
+
+  // Where the engine refuses the call (Desktop, an SDK host), `/compact` runs instead.
+  world.isHeadless = true
+  world.stepUsage.unshift(usage(0, 100_000))
+  await send($)
+  await clock.advance(59 * 60_000)
+  expect(world.compactCommands).toBe(1)
+  expect(world.toasts.at(-1)).toMatch(/^Compacted .* before its cache went cold$/)
+  await clock.advance(10 * 60_000)
+  expect(world.compactCommands).toBe(1)
 
   // A small chat is left to go cold.
   await send($)
