@@ -1,6 +1,8 @@
 # cache-clock
 
-A [Claude Code](https://claude.com/claude-code) mod that puts a countdown for each chat's **prompt cache** above the prompt, so you know when to come back before it goes cold, and what it costs if you don't.
+A mod for the **Code tab of the Claude Desktop app** that puts a countdown for each chat's **prompt cache** above the prompt, so you know when to come back before it goes cold, and what it costs if you don't.
+
+> **Made for Claude Desktop, not the `claude` CLI.** The band, its buttons, the charts and every animation are drawn for Desktop's Code tab. In a terminal session the mod still loads, but you get a plain text line and none of the visuals; it isn't designed or tested there.
 
 <img src="docs/band.gif" alt="The band above the prompt: Cache warm, turn running (1h TTL), 222k cached, with an LED panel sweeping across as a new cache is written" width="664">
 
@@ -10,7 +12,7 @@ When a message you send reuses the warm cache, a little pixel Clawd celebrates w
 
 ## Why
 
-Claude Code caches your conversation so each new message only pays full price for what's new. The cache expires after a while (1 hour or 5 minutes, depending on your plan and the request; subagents use 5 minutes). A message sent after that re-writes the whole conversation at the cache-write price, which on a long chat is a real cost and a slower response. Nothing in the app tells you how long you have. This mod does.
+Claude Code caches your conversation so each new message only pays full price for what's new. The cache expires after a while (1 hour or 5 minutes, depending on your plan and the request; subagents use 5 minutes). A message sent after that re-writes the whole conversation at the cache-write price, which on a long chat is a real cost and a slower response. Nothing in the Desktop app tells you how long you have. This mod does.
 
 ## What it shows
 
@@ -41,20 +43,20 @@ The saving is real: what reading the cache cost compared with writing it all aga
 
 ## Install
 
-In a terminal:
+Desktop's Code tab can't run `/plugin`, so install it once from a terminal (this needs the `claude` CLI on your machine; it installs for your user, and Desktop picks it up):
 
 ```
 claude plugin marketplace add jomplox/cache-clock
 claude plugin install cache-clock@cache-clock
 ```
 
-Or inside a `claude` session: `/plugin install cache-clock --marketplace jomplox/cache-clock`, answer `y` to add the marketplace, then pick the user scope. It loads in the CLI and in the Claude Desktop app's Code tab. The animations need a surface that draws images (Desktop); the terminal gets the text band.
+Then open a chat in the Claude Desktop app's **Code** tab (or run `/reload-plugins` in one that's already open). The band appears above the prompt.
 
-Requirements: macOS or Linux, with `jq` on the `PATH` (it reads the transcript for the TTL and the stats). Sounds play through `afplay` on macOS.
+Requirements: the Claude Desktop app on macOS (sounds play through `afplay`), and `jq` on the `PATH` (it reads the transcript for the TTL and the stats).
 
 ## Settings
 
-Under `/config` (or the app's plugin settings):
+Asked when you install. To change one later, from a terminal: `echo '{"reward":"animation"}' | claude plugin configure cache-clock --values-stdin` (keys: `keepWarm`, `keepWarmMax`, `alert`, `otherChats`, `reward`, `stats`), then `/reload-plugins` in Desktop.
 
 | Setting | Default | |
 |---|---|---|
@@ -88,7 +90,7 @@ claude plugin test .
 node scripts/sounds.mjs   # re-render sounds/*.wav from the scenes' timelines
 ```
 
-`hooks/register.tsx` is the band, keep-warm and the bookkeeping. `hooks/reward.ts` draws the reward scenes (pixel-art SVG, animated with SMIL) and synthesizes their sounds on the same timeline. To try a change, run `claude --plugin-dir .`, or copy the folder to `~/.claude/mods/cache-clock` and run `/reload-plugins`.
+`hooks/register.tsx` is the band, keep-warm and the bookkeeping. `hooks/reward.ts` draws the reward scenes (pixel-art SVG, animated with SMIL) and synthesizes their sounds on the same timeline. To try a change, copy the folder to `~/.claude/mods/cache-clock` and run `/reload-plugins` in a Desktop Code chat.
 
 ## License
 
