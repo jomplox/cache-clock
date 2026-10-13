@@ -2,7 +2,7 @@
 
 A [Claude Code](https://claude.com/claude-code) mod that puts a countdown for each chat's **prompt cache** above the prompt, so you know when to come back before it goes cold, and what it costs if you don't.
 
-![The band above the prompt: Cache warm, turn running, 222k cached](docs/band.png)
+<img src="docs/band.gif" alt="The band above the prompt: Cache warm, turn running (1h TTL), 222k cached, with an LED panel sweeping across as a new cache is written" width="664">
 
 When a message you send reuses the warm cache, a little pixel Clawd celebrates what it saved:
 
