@@ -42,7 +42,7 @@ function engine(on: On) {
     rateLimits: [] as { kind: string; percentUsed: number; resetsAt?: string }[],
     stopReason: 'end_turn' as string | null,
     agents: [] as { id: string; description: string; type: string; status: string }[],
-    tools: null as { name: string; description: string; mcp: boolean }[] | null,
+    tools: [] as { name: string; description: string; mcp: boolean }[],
     sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }],
   }
   on('ui.render', ($$, e) => {
@@ -60,10 +60,7 @@ function engine(on: On) {
   on('classic.PostModelSwitch', () => ({}))
   on('classic.SubagentStop', () => ({}))
   on('agent.list', () => ({ value: world.agents }))
-  on('tool.list', () => {
-    if (world.tools === null) throw new Error('no tools here')
-    return { value: world.tools }
-  })
+  on('tool.list', () => ({ value: world.tools }))
   on('prompt.compose', () => ({ sections: world.sections }))
   on('turn.step', async function* (_$, e) {
     const u = world.stepUsage.shift() ?? null
@@ -525,6 +522,38 @@ test("other chats' caches show in the band, this chat's is published", async ($,
   }
 })
 
+test("the other chats' hover opens with the week across chats: what warm returns saved, what every chat spent", async ($, on) => {
+  const now = 10_000_000_000
+  const clock = mock.clock(on, { now })
+  const world = engine(on)
+  const day = (at: number) => {
+    const d = new Date(at)
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  }
+  world.transcript = '/p/self.jsonl'
+  world.rateLimits = [{ kind: 'seven_day', percentUsed: 36, resetsAt: new Date(now + 86_400_000).toISOString() }]
+  const since = now + 86_400_000 - 7 * 86_400_000
+  // This chat: $1.30 this week, as the stats test has it.
+  world.spend = ['claude-opus-5-5\tfalse\ttrue\tfalse\t0\t1000000\t0\t0\t10000', 'claude-opus-5-5\ttrue\ttrue\ttrue\t0\t2000000\t100000\t0\t0'].join('\n')
+  // Another chat's week; one from last week's window is left out.
+  world.store.set('spend:erp', { since, total: 8.7, at: now - 3_600_000 })
+  world.store.set('spend:older', { since: since - 7 * 86_400_000, total: 99, at: now - 6 * 86_400_000 })
+  world.store.set('reward-days', { [day(now)]: 2.5, [day(now - 10 * 86_400_000)]: 100 })
+  world.store.set('chat:erp', { label: 'ERP', at: now - 20 * 60_000, ttlMin: 60 })
+  await start($)
+  world.stepUsage.push(usage(127_000, 0))
+  await send($)
+  await clock.advance(10_000)
+  await clock.advance(10_000)
+
+  expect(Math.round((world.store.get('spend:self') as any)?.total * 100)).toBe(130)
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const band = await $.ui.mount({ plugin: 'cache-clock', surface, ...BAND(false) })
+    expect(await band.find({ text: 'This week, all chats: saved $2.50 · spent $10.00   ' })).toBeDefined()
+    expect(await band.find({ text: /^ERP$/ })).toBeDefined()
+  }
+})
+
 test('/keep-warm now refreshes at once while warm, and refuses when cold', { options: { keepWarm: false } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
@@ -727,6 +756,8 @@ test('a typed message on the warm cache plays a reward and counts it; a miss tak
   expect(totals.streak).toBe(1)
   // 100k tokens read at Opus 5.5's $4/M (0.05x) instead of written again (2x).
   expect(Math.round(totals.saved * 100) / 100).toBe(0.78)
+  // And into the day's total, for the week across chats.
+  expect(Object.values(world.store.get('reward-days') as Record<string, number>).map(v => Math.round(v * 100) / 100)).toEqual([0.78])
 
   await clock.advance(5_000)
   const after = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })

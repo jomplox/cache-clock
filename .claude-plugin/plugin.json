@@ -1,6 +1,6 @@
 {
   "name": "cache-clock",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "For the Claude Desktop app's Code tab: shows how long each chat's prompt cache stays warm",
   "author": {
     "name": "Jose Vega",

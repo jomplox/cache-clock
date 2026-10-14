@@ -93,6 +93,8 @@ type Flags = {
   chime: AbortController | null
   /** When the last main request was sent, refreshes aside; 0 until one was. */
   askedAt: number
+  /** Every chat's week, as their sessions published it; null until read. */
+  week: { saved: number; spent: number } | null
   /** What the last main request sent ahead of the conversation; null until one ran. */
   prompt: PromptPrint | null
 }
@@ -193,7 +195,26 @@ async function refreshSpend($: EngineInterface, flags: Flags, now: number): Prom
   const isWindow = Number.isFinite(resets)
   const since = isWindow ? resets - WEEK : now - WEEK
   const out = await $.process.run(['/bin/sh', '-c', SPEND_SCRIPT, 'sh', String(Math.floor(since / 1000)), flags.transcript]).catch(() => null)
-  if (out && out.exitCode === 0 && !out.isStdoutTruncated) flags.spend = parseSpend(out.stdout, since, isWindow)
+  if (!out || out.exitCode !== 0 || out.isStdoutTruncated) return
+  flags.spend = parseSpend(out.stdout, since, isWindow)
+  // Published for every chat's week total, kept past this chat's own entry.
+  if (flags.sessionId) await $.store.set(SPEND_KEY + flags.sessionId, { since, total: flags.spend.total, at: now })
+}
+
+// Each chat's spend this week, and what warm returns saved per day, across chats.
+const SPEND_KEY = 'spend:'
+const SAVED_DAYS_KEY = 'reward-days'
+const dayKey = (at: number) => {
+  const d = new Date(at)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+async function addSavedToday($: EngineInterface, at: number, saved: number): Promise<void> {
+  const days = ((await $.store.get(SAVED_DAYS_KEY).catch(() => undefined)) ?? {}) as Record<string, number>
+  const keep = dayKey(at - WEEK - DAY)
+  const next = Object.fromEntries(Object.entries(days).filter(([d, v]) => d > keep && typeof v === 'number'))
+  next[dayKey(at)] = (next[dayKey(at)] ?? 0) + saved
+  await $.store.set(SAVED_DAYS_KEY, next).catch(() => {})
 }
 
 const usd = (n: number) => `$${n.toFixed(n >= 100 ? 0 : 2)}`
@@ -1076,7 +1097,15 @@ async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise
   if (!s.otherChats) return
 
   const list: OtherChat[] = []
+  const since = flags.spend?.since
+  let spent = 0
   for (const key of await $.store.keys()) {
+    if (key.startsWith(SPEND_KEY)) {
+      const v = (await $.store.get(key)) as { since?: number; total?: number; at?: number } | undefined
+      if (typeof v?.at !== 'number' || now - v.at > WEEK + DAY) await $.store.delete(key)
+      else if (since !== undefined && v.since === since && typeof v.total === 'number') spent += v.total
+      continue
+    }
     if (!key.startsWith(CHAT_KEY) || key === CHAT_KEY + flags.sessionId) continue
     const v = (await $.store.get(key)) as Partial<OtherChat> | undefined
     if (!v || typeof v.at !== 'number') continue
@@ -1085,6 +1114,12 @@ async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise
       continue
     }
     list.push({ id: key.slice(CHAT_KEY.length), label: String(v.label ?? 'chat'), at: v.at, ttlMin: v.ttlMin === 5 ? 5 : 60, tokens: v.tokens, isCompacted: v.isCompacted })
+  }
+  if (since !== undefined) {
+    const days = ((await $.store.get(SAVED_DAYS_KEY).catch(() => undefined)) ?? {}) as Record<string, number>
+    const first = dayKey(since)
+    const saved = Object.entries(days).reduce((sum, [d, v]) => (d >= first && typeof v === 'number' ? sum + v : sum), 0)
+    flags.week = { saved, spent }
   }
   // Unchanged, no write: a write redraws the band, restarting an animation.
   const prev = await read($, others)
@@ -1174,7 +1209,7 @@ function otherChatsShown(
 
 export const register: Register = (on, options) => {
   const s = settings(options)
-  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, askedAt: 0, prompt: null }
+  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, askedAt: 0, week: null, prompt: null }
 
   // Also runs on a mod (re)load inside an open chat: seed from its transcript so
   // the band shows before the next message.
@@ -1431,6 +1466,7 @@ export const register: Register = (on, options) => {
         await $.store
           .set(TOTALS_KEY, isMiss ? { ...totals, streak: 0 } : { day: totals.day, saved: totals.saved + won.saved, streak: totals.streak + 1 })
           .catch(() => {})
+        if (!isMiss) await addSavedToday($, won.at, won.saved)
       }
     } else if (prize !== null) {
       // No response: nothing was read, so nothing was saved.
@@ -1600,9 +1636,11 @@ export const register: Register = (on, options) => {
     // Other chats stay out of the way: a dim count on this chat's line, and
     // the list itself on hover.
     const chats = s.otherChats ? otherChatsShown(await read($, others), now) : []
+    const week = flags.week !== null && flags.week.spent + flags.week.saved >= 0.005 ? flags.week : null
     const chatList =
       chats.length > 0 ? (
         <Text key="chat-list" wrap="truncate-end">
+          {week !== null ? <Text>{`This week, all chats: saved ${usd(week.saved)} · spent ${usd(week.spent)}   `}</Text> : null}
           {chats.slice(0, 5).map((c, i) => (
             <Text key={`chat-${c.id}`} dimColor>
               {i > 0 ? '   ' : ''}

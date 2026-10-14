@@ -19,7 +19,7 @@ Claude Code caches your conversation so each new message only pays full price fo
 - **The countdown.** `● Cache warm · 41:20 left (1h TTL) · 248k cached (≈$0.80 if it goes cold)`. It turns yellow near the end, and becomes `○ Cache cold · expired 3:10 ago` after. It knows the cache's real TTL from the transcript, and that switching models, `/compact` or `/clear` starts a new one.
 - **A new cache.** When a message writes a new cache, an LED panel lights up across the band and breaks away, to a little tune of its own (mallets and bells, in step with the lights).
 - **A miss.** If a message expected to read the cache didn't, the band says so, and why when it can see it: an MCP server that connected or left, a tool added, removed or reworded, a changed section of the system prompt, or a new effort level.
-- **Other chats.** How many other chats have a cache; hover the count for how long each has left, soonest first (with Stats off, the list shows under the band).
+- **Other chats.** How many other chats have a cache; hover the count for how long each has left, soonest first (with Stats off, the list shows under the band). The list opens with the week across chats: what warm returns saved and what every chat spent at list price. It counts the chats whose session ran this week with the mod; each publishes its own total as it reads its stats.
 - **Stats** (toggle in the band). What going cold would cost compared with reading the cache warm, how much of this chat was read from cache, how often it was rebuilt, and charts of both. And what this chat and its subagents spent today and this week (your plan's weekly window, else the last 7 days), at list price.
 - **Subagents and workflows.** Their caches, and what a running workflow has read from cache.
 
@@ -85,7 +85,7 @@ Asked when you install. To change one later, from a terminal: `echo '{"reward":"
 
 ## What it keeps
 
-- Per-chat state lives in the session; other chats' caches and the reward totals in the mod's store, under `~/.claude/plugins/store/`.
+- Per-chat state lives in the session; other chats' caches, each chat's weekly spend and the reward totals in the mod's store, under `~/.claude/plugins/store/`.
 - Keep-warm refreshes and compactions are logged, one line each, to `~/.claude/cache-clock.log` (trimmed to its last 500 lines once it passes 1000).
 - Nothing is sent anywhere. The only requests it makes are keep-warm's own refreshes, on your account, when you turn it on.
 
