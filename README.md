@@ -103,6 +103,10 @@ node scripts/sounds.mjs   # re-render sounds/*.wav from the scenes' timelines
 
 `hooks/register.tsx` is the band, keep-warm and the bookkeeping. `hooks/reward.ts` draws the reward scenes (pixel-art SVG, animated with SMIL) and synthesizes their sounds on the same timeline. To try a change, copy the folder to `~/.claude/mods/cache-clock` and run `/reload-plugins` in a Desktop Code chat.
 
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md) and the [Releases page](https://github.com/jomplox/cache-clock/releases).
+
 ## License
 
 [Apache 2.0](LICENSE). Clawd is Anthropic's mascot, drawn here in homage. This is a community mod, not an Anthropic product.
