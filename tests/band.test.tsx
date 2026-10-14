@@ -33,11 +33,12 @@ function engine(on: On) {
     isHeadless: false,
     compactCommands: 0,
     toasts: [] as string[],
-    sounds: 0,
+    sounds: [] as string[],
     store: new Map<string, unknown>(),
     transcript: '',
     stats: '',
     spend: '',
+    tail: '',
     rateLimits: [] as { kind: string; percentUsed: number; resetsAt?: string }[],
     stopReason: 'end_turn' as string | null,
     agents: [] as { id: string; description: string; type: string; status: string }[],
@@ -73,6 +74,9 @@ function engine(on: On) {
     if (e.argv.join(' ').includes('jq ')) {
       return { value: { exitCode: 0, stdout: world.stats, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
+    if (e.argv[0] === 'tail' && world.tail) {
+      return { value: { exitCode: 0, stdout: world.tail, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     const found = world.transcript && e.argv.join(' ').includes('ls ')
     return { value: { exitCode: found ? 0 : 1, stdout: found ? `${world.transcript}\n` : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -90,8 +94,8 @@ function engine(on: On) {
     world.toasts.push(e.text)
     return { value: undefined }
   })
-  on('audio.play', () => {
-    world.sounds += 1
+  on('audio.play', (_$, e) => {
+    world.sounds.push('asset' in e.clip ? e.clip.asset : '')
     return { value: undefined }
   })
   on('store.get', (_$, e) => ({ value: world.store.get(e.key) }))
@@ -193,6 +197,40 @@ test('compaction shows the new context as uncached until the next message', asyn
   expect(await warm.find({ text: /60:00 left/ })).toBeDefined()
 })
 
+test("a subagent's own compaction leaves the main chat's cache as it was", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  engine(on)
+  await send($)
+  await clock.advance(60_000)
+
+  await $.classic.PostCompact({ trigger: 'auto', compact_summary: 'summary', agent_id: 'a1', agent_type: 'mt-port' } as any)
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: /Compacted/ })).toBeUndefined()
+  expect(await band.find({ text: /59:00 left/ })).toBeDefined()
+})
+
+test("a background subagent's compaction, reported without its agent_id, leaves the chat's cache as it was", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  const at = new Date(1_000_000).toISOString()
+  const row = (o: object) => JSON.stringify({ timestamp: at, isSidechain: false, ...o })
+  world.tail = [
+    row({ type: 'user', message: { role: 'user', content: 'go' } }),
+    row({ type: 'assistant', message: { id: 'm1', model: 'claude-opus-5-5', usage: { ...usage(100_000, 0), cache_creation: { ephemeral_1h_input_tokens: 0 } } } }),
+  ].join('\n')
+  await $.classic.SessionStart({ session_id: 'self', transcript_path: '/p/self.jsonl', cwd: '/work', hook_event_name: 'SessionStart', source: 'startup' } as any)
+
+  await $.classic.PostCompact({ trigger: 'auto', compact_summary: 'summary' } as any)
+  await clock.advance(20_000)
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: /Compacted/ })).toBeUndefined()
+
+  world.tail += '\n' + row({ type: 'system', subtype: 'compact_boundary' })
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'summary' } as any)
+  const compacted = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await compacted.find({ text: /Compacted/ })).toBeDefined()
+})
+
 test('a model switch reads cold until switched back', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   engine(on)
@@ -237,7 +275,7 @@ test('keep-warm refreshes before expiry, up to its limit, then compacts', { opti
   expect(world.forks).toBe(2)
   expect(world.compactions).toBe(1)
   expect(world.toasts).toEqual([expect.stringMatching(/^Compacted .* before its cache went cold$/)])
-  expect(world.sounds).toBe(0)
+  expect(world.sounds.includes('sounds/expiring.wav')).toBe(false)
   await clock.advance(10 * 60_000)
   expect(world.compactions).toBe(1)
   const compacted = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
@@ -383,7 +421,8 @@ test("other chats' caches show in the band, this chat's is published", async ($,
   for (const surface of ['desktop', 'terminal'] as const) {
     const band = await $.ui.mount({ plugin: 'cache-clock', surface, ...BAND(false) })
     expect(await band.find({ text: /2 other chats$/ })).toBeDefined()
-    expect(await band.find({ text: /Kiosk expires in 2:5\d/ })).toBeDefined()
+    expect(await band.find({ text: /expires in/ })).toBeUndefined()
+    expect(await band.find({ text: /^Kiosk$/ })).toBeDefined()
     expect(await band.find({ text: /^ERP$/ })).toBeDefined()
     expect(await band.find({ text: /39:5\d/ })).toBeDefined()
     expect(await band.find({ text: /Old/ })).toBeUndefined()
@@ -572,7 +611,7 @@ test('a typed message on the warm cache plays a reward and counts it; a miss tak
   expect(await band.find({ text: / · 1 in a row/ })).toBeDefined()
   // Once the response says: the read, the 800 written and the 10 uncached, at $4/M.
   expect(await band.find({ text: / · prompt \$0\.03 · / })).toBeDefined()
-  expect(world.sounds).toBe(1)
+  expect(world.sounds).toEqual(['sounds/mint.wav', 'sounds/reward-shades.wav'])
   const terminal = await $.ui.mount({ plugin: 'cache-clock', surface: 'terminal', ...BAND(true) })
   expect(await terminal.find({ key: 'reward-1060000' })).toBeUndefined()
   const totals = world.store.get('reward-totals') as { saved: number; streak: number }
@@ -590,7 +629,7 @@ test('a typed message on the warm cache plays a reward and counts it; a miss tak
   await clock.advance(60_000)
   await $.prompt.submit({ text: 'again', asUser: true })
   await send($)
-  expect(world.sounds).toBe(2)
+  expect(world.sounds).toEqual(['sounds/mint.wav', 'sounds/reward-shades.wav', 'sounds/reward-mug.wav', 'sounds/mint.wav'])
   const missed = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
   expect(await missed.find({ key: 'reward-1125000' })).toBeUndefined()
   expect((world.store.get('reward-totals') as { streak: number }).streak).toBe(0)
@@ -605,7 +644,37 @@ test('a turn nobody typed (a wake-up) plays no reward', async ($, on) => {
   await send($)
   const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
   expect(await band.find({ key: 'reward-1060000' })).toBeUndefined()
-  expect(world.sounds).toBe(0)
+  expect(world.sounds).toEqual(['sounds/mint.wav'])
+})
+
+test('the Sound button mutes every sound of the mod, in every chat, until pressed again', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  world.stepUsage.push(usage(0, 100_000), usage(100_000, 800), usage(0, 100_000), usage(100_000, 800))
+  await send($)
+  expect(world.sounds).toEqual(['sounds/mint.wav'])
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  await band.press({ key: 'sound-toggle' })
+  expect(world.store.get('sound')).toBe(false)
+  const muted = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await muted.find({ text: 'Sound: off' })).toBeDefined()
+
+  // A reward, and then a new cache, play their scenes silently.
+  world.sounds.length = 0
+  await clock.advance(60_000)
+  await $.prompt.submit({ text: 'next', asUser: true })
+  await send($)
+  const quiet = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(true) })
+  expect(await quiet.find({ key: 'reward-1060000' })).toBeDefined()
+  await clock.advance(2 * 3_600_000)
+  await send($)
+  expect(world.sounds).toEqual([])
+
+  await quiet.press({ key: 'sound-toggle' })
+  expect(world.store.get('sound')).toBe(true)
+  await clock.advance(2 * 3_600_000)
+  await send($)
+  expect(world.sounds).toEqual(['sounds/mint.wav'])
 })
 
 test('a reward goes into the totals as another chat left them; no response takes it back', async ($, on) => {
@@ -650,7 +719,7 @@ test('keep-warm holds the cache while a workflow runs, then goes back to its lim
   await clock.advance(60 * 60_000)
   expect(world.forks).toBe(2)
   const held = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
-  expect(await held.find({ text: /keeping warm for workflow mint-animation/ })).toBeDefined()
+  expect(await held.find({ text: /keeping warm/ })).toBeUndefined()
   expect(await held.find({ text: /refreshed 2\/40/ })).toBeDefined()
 
   // The run ended: back to keepWarmMax, which is spent, so it compacts.
@@ -664,7 +733,7 @@ test('keep-warm holds the cache while a workflow runs, then goes back to its lim
   expect(await after.find({ text: /ended/ })).toBeDefined()
 })
 
-test('without keep-warm a running workflow turns amber near expiry; its run stats and the cold cost show', async ($, on) => {
+test('without keep-warm a running workflow is named in the expiry toast, not the band; its run stats and the cold cost show', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
   on('tool.call', () => ({ result: WORKFLOW as any }))
@@ -680,14 +749,14 @@ test('without keep-warm a running workflow turns amber near expiry; its run stat
 
   const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
   expect(await band.find({ text: /≈\$0\.80 if it goes cold/ })).toBeDefined()
-  expect(await band.find({ text: / · workflow mint-animation running/ })).toBeDefined()
+  expect(await band.find({ text: / · workflow mint-animation running/ })).toBeUndefined()
   expect(await band.find({ text: /1 agent · 75% of 40k prompt tokens read from cache/ })).toBeDefined()
   // Its agents are not this chat's subagents.
   expect(await band.find({ text: /left to resume/ })).toBeUndefined()
 
   await clock.advance(56 * 60_000)
   const low = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
-  expect(await low.find({ text: /still running; the cache expires first unless kept warm/ })).toBeDefined()
+  expect(await low.find({ text: /still running/ })).toBeUndefined()
   expect(world.toasts[0]).toMatch(/while workflow mint-animation is still running/)
 })
 

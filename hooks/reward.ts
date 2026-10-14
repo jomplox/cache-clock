@@ -1,16 +1,18 @@
 // The reward for a message that reused a warm cache: a little pixel Clawd pops
 // up where the ● sits, a gold coin bounces in along the band, and a prop
 // makes the moment: the coin drops into a piggy bank, sunglasses drop onto
-// Clawd, or a mug of coffee (the cache is warm) steams a heart. A close call
-// has Clawd sprint in and flip a nearly empty hourglass; a milestone gets the
-// guitar. "Saved $x" then rolls up like an odometer. Each scene's sound is
-// rendered from the same timeline (scripts/sounds.mjs), so every bounce, the
-// catch and each strum land on their frame.
+// Clawd, a mug of coffee (the cache is warm) steams a heart, a bubblegum
+// bubble grows until it pops all over his face, or he dons a top hat and a
+// monocle that pops out at the total. A close call has Clawd sprint in and
+// flip a nearly empty hourglass; a milestone gets the guitar. "Saved $x" then
+// rolls up like an odometer. Each scene's sound is rendered from the same
+// timeline (scripts/sounds.mjs), so every bounce, the catch and each strum
+// land on their frame.
 
 import type { RewardVariant } from '../types'
 
-export const REWARD_EVERYDAY: readonly RewardVariant[] = ['piggy', 'shades', 'mug']
-export const REWARD_VARIANTS: readonly RewardVariant[] = ['piggy', 'shades', 'mug', 'hourglass', 'guitar']
+export const REWARD_EVERYDAY: readonly RewardVariant[] = ['piggy', 'shades', 'mug', 'gum', 'tophat']
+export const REWARD_VARIANTS: readonly RewardVariant[] = ['piggy', 'shades', 'mug', 'gum', 'tophat', 'hourglass', 'guitar']
 
 const W = 2400
 export const REWARD_H = 22
@@ -138,6 +140,16 @@ const hop = (at: number): [number, number][] => [
 // The flip of a close call: when Clawd turns the hourglass over.
 const FLIP = 0.75
 const STRUMS = [1.3, 1.62, 1.94, 2.4]
+// The bubblegum: blown from his face, popped, worn, shaken, then dropped.
+const GUM_BLOW = 1.6
+const GUM_POP = 2.6
+const GUM_SHAKE = 2.9
+const GUM_FALL = 3.45
+const BUBBLE: [number, number][] = [[1.6, 3], [1.75, 4], [1.9, 5], [2.05, 6], [2.2, 7], [2.32, 8], [2.42, 9], [2.5, 10], [2.55, 9], [2.58, 10]]
+// The top hat lands, the monocle goes in, and pops out at the total.
+const HAT_ON = 0.4
+const MONO_ON = 1.55
+const MONO_POP = 2.7
 
 function plan(v: RewardVariant): Plan {
   const p: Plan = { tc: 1.0, target: [CX, CY - 1], poses: [[0, 'idle']], y: popY(0.05), x: [[0, 0]], sounds: [['pop', 0.05]] }
@@ -154,6 +166,18 @@ function plan(v: RewardVariant): Plan {
     p.poses.push([p.tc, 'cheer'], [p.tc + 0.5, 'idle'], [p.tc + 1.0, 'left'], [p.tc + 1.8, 'idle'])
     p.y.push(...hop(p.tc))
     p.sounds.push(['bubble', p.tc + 0.2], ['bubble', p.tc + 0.45], ['bubble', p.tc + 0.7], ['chirp', p.tc + 1.0])
+  } else if (v === 'gum') {
+    // Chews, blows, and is startled when it pops; shakes his head, then wipes.
+    p.poses.push([p.tc, 'cheer'], [p.tc + 0.3, 'idle'], [GUM_POP, 'cheer'], [GUM_POP + 0.2, 'idle'], [GUM_FALL - 0.15, 'wipe'], [GUM_FALL + 0.2, 'idle'])
+    p.y.push(...hop(p.tc), [1.32, 1], [1.4, 0], [1.47, 1], [1.55, 0], [GUM_POP, -3], [GUM_POP + 0.08, -1], [GUM_POP + 0.14, 0])
+    p.x = [[0, 0], [GUM_SHAKE, 2], [GUM_SHAKE + 0.06, -2], [GUM_SHAKE + 0.12, 2], [GUM_SHAKE + 0.18, -2], [GUM_SHAKE + 0.24, 0]]
+    p.sounds.push(['chew', 1.32], ['chew', 1.47], ['inflate', GUM_BLOW], ['bang', GUM_POP], ['shake', GUM_SHAKE], ['plop', GUM_FALL + 0.1])
+  } else if (v === 'tophat') {
+    // No hopping in a top hat: he tips it at the catch, screws in a monocle,
+    // then sees the total and it pops out.
+    p.poses.push([p.tc - 0.05, 'right'], [p.tc + 0.35, 'idle'], [MONO_POP, 'cheer'], [MONO_POP + 0.35, 'idle'])
+    p.y.push([MONO_POP, -2], [MONO_POP + 0.08, 0])
+    p.sounds.push(['plop', HAT_ON + 0.16], ['ting', MONO_ON], ['fancy', MONO_ON + 0.15], ['boing', MONO_POP], ['tink', MONO_POP + 0.32])
   } else if (v === 'hourglass') {
     p.tc = 1.5
     // Clawd sprints in from off the left, reaches, flips, wipes his brow.
@@ -212,7 +236,20 @@ function propGroup(body: string, jiggles: number[] = []): string {
 
 const PIG = ['..d..ss.....', '.pppppppppp.', 'dpkpppppppppd', 'ddpppppppppp', '.pppppppppp.', '..d.d..d.d..']
 const MUG = ['mbbbbm..', 'mmmmmmh.', 'mmmmmm.h', 'mmmmmm.h', 'mmmmmmh.', '.mmmm...']
-const HEART = 'M0 1h2v-1h2v1h1v-1h2v1h2v2h-1v1h-1v1h-1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-1h-1z'
+// Pink gum all over his face after the pop, one eye peeking out, dripping.
+const GUM_FACE = ['...pppppp...', 'pppppppppppp', 'p..ppppppppp', 'pp.ppppppppp', '.p..pdp..pd.', '....d.....d.']
+
+// A disc of radius r, in 2px rows.
+function disc(cls: string, cx: number, cy: number, r: number): string {
+  let s = ''
+  for (let y = -r; y < r; y += 2) {
+    const w = Math.round(Math.sqrt(Math.max(0, r * r - (y + 1) * (y + 1))))
+    if (w > 0) s += `<rect class="${cls}" x="${cx - w}" y="${cy + y}" width="${2 * w}" height="2"/>`
+  }
+  return s
+}
+
+const HEART ='M0 1h2v-1h2v1h1v-1h2v1h2v2h-1v1h-1v1h-1v1h-1v1h-1v-1h-1v-1h-1v-1h-1v-1h-1z'
 
 function props(v: RewardVariant, p: Plan): { prop: string; worn: string } {
   const tc = p.tc
@@ -250,6 +287,63 @@ function props(v: RewardVariant, p: Plan): { prop: string; worn: string } {
       `<animate attributeName="opacity" begin="${sec(tc + 1.0)}" dur="1.2s" values="0;1;1;0" keyTimes="0;0.1;0.7;1" fill="freeze"/>` +
       `<animateTransform attributeName="transform" type="translate" begin="${sec(tc + 1.0)}" dur="1.2s" calcMode="discrete" values="0 3;1 1;0 -1;1 -3;0 -5" fill="freeze"/></g>`
     return { prop: propGroup(grid('mug', 44, 9, MUG)) + steam + heart, worn: '' }
+  }
+  if (v === 'gum') {
+    // Worn, so the bubble rides his chewing: one disc a size, each shown
+    // until the next, the last until the pop.
+    const bubble = BUBBLE.map(([t, r], i) => {
+      const cx = 30 + r
+      const shine = r >= 5 ? `<rect class="bh" x="${cx - Math.round(r / 2) - 1}" y="${13 - Math.round(r / 2) - 1}" width="2" height="2"/>` : ''
+      return `<g opacity="0">${stepAnim('opacity', [[0, 0], [t, 1], [BUBBLE[i + 1]?.[0] ?? GUM_POP, 0]])}${disc('bu', cx, 13, r)}${shine}</g>`
+    }).join('')
+    const face = stepMove([[0, '0 0'], [GUM_FALL, '0 2'], [GUM_FALL + 0.06, '0 6'], [GUM_FALL + 0.12, '0 11'], [GUM_FALL + 0.18, '0 17']])
+    const splat = `<g opacity="0">${shown(GUM_POP, GUM_FALL + 0.24)}<g>${face}${grid('gu', 8, 4, GUM_FACE)}</g></g>`
+    const bits = [[-16, -7], [-6, -10], [8, -9], [16, -3], [14, 6], [-12, 6], [20, 2], [4, 8]]
+      .map(
+        ([dx, dy]) =>
+          `<rect class="bu" x="39" y="11" width="3" height="3" opacity="0">` +
+          `<animate attributeName="opacity" begin="${sec(GUM_POP)}" dur="0.35s" values="1;1;0" fill="freeze"/>` +
+          `<animateTransform attributeName="transform" type="translate" begin="${sec(GUM_POP)}" dur="0.35s" calcMode="discrete" values="0 0;${dx! / 2} ${dy! / 2};${dx} ${dy}" fill="freeze"/></rect>`,
+      )
+      .join('')
+    return { prop: bits, worn: bubble + splat }
+  }
+  if (v === 'tophat') {
+    // Worn: the hat drops onto his head and tips at the catch; the monocle
+    // goes in, then pops out and falls away.
+    const hat =
+      '<rect class="hk" x="14" y="0" width="12" height="4"/><rect class="hh" x="14" y="0" width="12" height="1"/><rect class="hh" x="14" y="1" width="1" height="2"/>' +
+      '<rect class="hb" x="14" y="3" width="12" height="1"/><rect class="hk" x="10" y="4" width="20" height="2"/><rect class="hh" x="10" y="4" width="20" height="1"/>'
+    const tip = stepMove([
+      [0, '0 -12'],
+      [HAT_ON, '0 -12'],
+      [HAT_ON + 0.06, '0 -7'],
+      [HAT_ON + 0.12, '0 -2'],
+      [HAT_ON + 0.16, '0 0'],
+      [tc - 0.05, '1 -2'],
+      [tc + 0.02, '2 -4'],
+      [tc + 0.25, '1 -2'],
+      [tc + 0.32, '0 0'],
+    ])
+    const monocle =
+      '<rect class="mg" x="25" y="7" width="4" height="5"/>' +
+      '<rect class="mo" x="25" y="6" width="4" height="1"/><rect class="mo" x="25" y="12" width="4" height="1"/><rect class="mo" x="24" y="7" width="1" height="5"/><rect class="mo" x="29" y="7" width="1" height="5"/>' +
+      '<rect class="mo" x="30" y="13" width="1" height="1"/><rect class="mo" x="31" y="15" width="1" height="1"/><rect class="mo" x="31" y="17" width="1" height="1"/>'
+    const fall = stepMove([
+      [0, '0 0'],
+      [MONO_POP, '0 -3'],
+      [MONO_POP + 0.06, '2 -5'],
+      [MONO_POP + 0.12, '4 -3'],
+      [MONO_POP + 0.2, '5 2'],
+      [MONO_POP + 0.28, '6 8'],
+      [MONO_POP + 0.36, '6 16'],
+    ])
+    const glint =
+      `<rect class="g" x="25" y="7" width="1" height="5" opacity="0">` +
+      `<animate attributeName="opacity" begin="${sec(MONO_ON)}" dur="0.3s" values="0;1;1;0" fill="freeze"/>` +
+      `<animate attributeName="x" begin="${sec(MONO_ON)}" dur="0.3s" calcMode="discrete" values="25;26;27;28" fill="freeze"/></rect>`
+    const worn = `<g opacity="0">${shown(HAT_ON)}<g>${tip}${hat}</g></g><g opacity="0">${shown(MONO_ON, MONO_POP + 0.4)}<g>${fall}${monocle}${glint}</g></g>`
+    return { prop: plus(X0 + 36, 4, MONO_ON + 0.1) + plus(X0 + 40, 14, MONO_POP + 0.05), worn }
   }
   if (v === 'hourglass') {
     // Nearly run out: a grain of sand left on top, a full pile below; turned
@@ -336,7 +430,8 @@ export function rewardSvg(at: number, v: RewardVariant, elapsedMs = 0): string {
     '.w{fill:#8fc7ff}.h{fill:#ff6b8a}.n{fill:#e3b341}.gb{fill:#f3e3c3}.gn{fill:#4a2f1a}' +
     '.k{fill:#111}.kh{fill:#5a6a7a}.g{fill:#fff}.f{fill:#8a5a2b}.gl{fill:#cfe8ff;fill-opacity:.35}.sd{fill:#e3b341}.s{fill:#c9c9c9}' +
     '.pigp{fill:#f4a6b8}.pigd{fill:#d9758f}.pigk{fill:#1f1e1d}.pigs{fill:#7a3a4a}.mugm{fill:#f3e3c3}.mugb{fill:#6b4226}.mugh{fill:#f3e3c3}' +
-    '@media (prefers-color-scheme:light){.p{fill:#d9a227}.d{fill:#d9a227}.r{stroke:#d9a227}.n{fill:#b07d10}.s{fill:#9a998f}.gl{fill:#7fa7c9}.mugm,.mugh{fill:#e6d3ad}}' +
+    '.bu,.gup{fill:#ff8fc8}.bh{fill:#ffe3f1}.gud{fill:#e0609e}.hk{fill:#4a4a5c}.hh{fill:#8a8aa0}.hb{fill:#c0392b}.mo{fill:#e3b341}.mg{fill:#cfe8ff;fill-opacity:.35}' +
+    '@media (prefers-color-scheme:light){.p{fill:#d9a227}.d{fill:#d9a227}.r{stroke:#d9a227}.n{fill:#b07d10}.s{fill:#9a998f}.gl{fill:#7fa7c9}.mugm,.mugh{fill:#e6d3ad}.hk{fill:#26262e}.hh{fill:#5a5a6e}.mo{fill:#b07d10}.mg{fill:#7fa7c9}}' +
     '</style>' +
     body +
     '</svg>'
@@ -451,6 +546,35 @@ export function rewardSamples(v: RewardVariant): Float32Array {
     if (kind === 'strum') G.forEach((f, i) => pluck(t + i * 0.012, f, 0.09))
     if (kind === 'strumUp') [...C].reverse().forEach((f, i) => pluck(t + i * 0.01, f, 0.08))
     if (kind === 'strumBig') G.forEach((f, i) => pluck(t + i * 0.02, f, 0.11, 2.0))
+    if (kind === 'chew') blip(t, 170, 120, 0.07, 0.08, 0.5)
+    if (kind === 'inflate') {
+      // A rubbery squeak rising with the bubble, cut off by the pop.
+      const len = GUM_POP - t
+      let ph = 0
+      add(t, len, s => {
+        ph += (2 * Math.PI * (260 + 520 * Math.pow(s / len, 1.4)) * (1 + 0.03 * Math.sin(2 * Math.PI * 7 * s))) / SR
+        return 0.05 * Math.min(1, s / 0.1) * (Math.sin(ph) + 0.4 * Math.sin(2 * ph))
+      })
+    }
+    if (kind === 'bang') {
+      add(t, 0.08, s => 0.45 * noise() * Math.exp(-s / 0.02))
+      blip(t, 180, 60, 0.14, 0.2)
+      blip(t + 0.05, 600, 150, 0.14, 0.08, 0.8)
+    }
+    if (kind === 'shake') for (let k = 0; k < 4; k++) blip(t + k * 0.06, k % 2 ? 330 : 280, k % 2 ? 260 : 220, 0.05, 0.06, 0.6)
+    if (kind === 'plop') {
+      blip(t, 240, 120, 0.08, 0.12)
+      add(t, 0.01, s => 0.08 * noise() * (1 - s / 0.01))
+    }
+    if (kind === 'fancy') [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => pluck(t + i * 0.09, f, 0.08, 0.7))
+    if (kind === 'boing') {
+      let ph = 0
+      add(t, 0.5, s => {
+        ph += (2 * Math.PI * 240 * (1 + 0.8 * Math.exp(-s / 0.12)) * (1 + 0.18 * Math.sin(2 * Math.PI * 16 * s) * Math.exp(-s / 0.25))) / SR
+        return 0.12 * Math.min(1, s / 0.005) * Math.exp(-s / 0.18) * Math.sin(ph)
+      })
+    }
+    if (kind === 'tink') bell(t, 4186, 0.06, 0.4)
   }
   c.lands.forEach(({ t }, i) => blip(t, 900 + i * 220, 1100 + i * 260, 0.03, 0.09))
   bell(p.tc, 1318.5, 0.2)

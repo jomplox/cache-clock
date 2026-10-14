@@ -89,6 +89,8 @@ type Flags = {
   isTyped: boolean
   // The reward's sound while it plays, so a takeback or the next one stops it.
   jingle: AbortController | null
+  // The new-cache sound, likewise.
+  chime: AbortController | null
 }
 
 // The main conversation's requests, from its transcript: what they read from
@@ -805,7 +807,7 @@ async function replayDemo($: EngineInterface, s: Settings, flags: Flags): Promis
     return
   }
   const mint = await read($, minted)
-  if (mint === null || now - mint.at >= MINT_MS + 500) await update($, minted, () => ({ at: now, tokens: 0 }))
+  if (mint === null || now - mint.at >= MINT_MS + 500) await mintNow($, flags, now, 0)
 }
 
 // The reward's running totals, across chats: saved today and warm returns
@@ -820,6 +822,33 @@ async function readTotals($: EngineInterface, at: number): Promise<Totals> {
   return { day, saved: v?.day === day && typeof v.saved === 'number' ? v.saved : 0, streak: typeof v?.streak === 'number' ? v.streak : 0 }
 }
 
+// The band's Sound button mutes every sound of the mod, in every chat.
+const SOUND_KEY = 'sound'
+const isSoundOn = async ($: EngineInterface) => (await $.store.get(SOUND_KEY).catch(() => undefined)) !== false
+
+async function setSound($: EngineInterface, flags: Flags, isOn: boolean): Promise<void> {
+  await $.store.set(SOUND_KEY, isOn)
+  if (!isOn) {
+    flags.jingle?.abort()
+    flags.chime?.abort()
+  }
+  $.ui.invalidate('ui.render')
+}
+
+// Plays one of the mod's sounds unless they are muted; aborting `ctl` stops it.
+async function playSound($: EngineInterface, asset: string, ctl?: AbortController): Promise<void> {
+  if (!(await isSoundOn($))) return
+  await $.audio.play({ asset }, ctl ? { signal: ctl.signal } : undefined).catch(() => {})
+}
+
+// A new cache: the LED panel, and its sound.
+async function mintNow($: EngineInterface, flags: Flags, at: number, tokens: number): Promise<void> {
+  await update($, minted, () => ({ at, tokens }))
+  flags.chime?.abort()
+  const chime = (flags.chime = new AbortController())
+  void playSound($, 'sounds/mint.wav', chime)
+}
+
 // The scene's clock starts here, with its sound, so the two stay together.
 async function playReward($: EngineInterface, s: Settings, flags: Flags, r: Reward): Promise<void> {
   r.at = await $.clock.now()
@@ -828,7 +857,7 @@ async function playReward($: EngineInterface, s: Settings, flags: Flags, r: Rewa
   flags.jingle = null
   if (s.reward === 'animation+sound') {
     const jingle = (flags.jingle = new AbortController())
-    $.audio.play({ asset: `sounds/reward-${r.variant}.wav` }, { signal: jingle.signal }).catch(() => {})
+    void playSound($, `sounds/reward-${r.variant}.wav`, jingle)
   }
   $.clock.after(REWARD_MS + 20, () => $.ui.invalidate('ui.render'))
 }
@@ -945,7 +974,7 @@ async function maybeAlert($: EngineInterface, s: Settings, flags: Flags): Promis
   const how = (kw.isOn ?? s.keepWarm) ? 'send a message' : 'send a message, or turn on keep-warm,'
   const then = willCompact(s, kw, info) ? `; otherwise it compacts with ${clock(refreshLead(info.ttlMin))} left` : ''
   $.ui.toast(`Cache for ${name} expires in ${clock(left)}${waiting}: ${how} to keep it${then}`, { timeoutMs: 15_000 })
-  if (s.alert === 'toast+sound') await $.audio.play({ asset: 'sounds/expiring.wav' }).catch(() => {})
+  if (s.alert === 'toast+sound') await playSound($, 'sounds/expiring.wav')
 }
 
 // With keep-warm off, whether the chat will be compacted before it goes cold.
@@ -1055,7 +1084,7 @@ function rewardLine({ Box, Text, Svg }: Pick<Elements['desktop'], 'Box' | 'Text'
 function otherChatsShown(
   list: readonly OtherChat[],
   now: number,
-): { id: string; title: string; status: string; isExpiring: boolean; left: number }[] {
+): { id: string; title: string; status: string }[] {
   const rank = (c: { left: number; isCompacted?: boolean }) => (c.isCompacted ? 1 : c.left > 0 ? 0 : 2)
   return list
     .map(c => ({ ...c, left: c.at + c.ttlMin * 60_000 - now }))
@@ -1065,14 +1094,12 @@ function otherChatsShown(
       id: c.id,
       title: short(c.label, 28),
       status: c.isCompacted ? 'compacted' : c.left > 0 ? clock(c.left) : 'cold',
-      isExpiring: !c.isCompacted && c.left > 0 && c.left <= alertLead(c.ttlMin),
-      left: c.left,
     }))
 }
 
 export const register: Register = (on, options) => {
   const s = settings(options)
-  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null }
+  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null }
 
   // Also runs on a mod (re)load inside an open chat: seed from its transcript so
   // the band shows before the next message.
@@ -1267,7 +1294,7 @@ export const register: Register = (on, options) => {
     // A turn opening with no warm cache will write a new one: mint now, as the
     // person sends, rather than when the first response ends.
     const isColdStart = e.index === 0 && expected === undefined
-    if (isColdStart) await update($, minted, () => ({ at, tokens: prev?.tokens ?? 0 }))
+    if (isColdStart) await mintNow($, flags, at, prev?.tokens ?? 0)
     // A message typed onto the warm cache earns the reward; one typed onto a
     // cold one ends the run of warm returns.
     const isTyped = e.index === 0 && flags.isTyped
@@ -1300,8 +1327,7 @@ export const register: Register = (on, options) => {
       const write = usage.cache_creation_input_tokens ?? 0
       const isMint = write >= 1024 && ((e.index === 0 && (expected === undefined || isMiss)) || (write >= 4096 && write > total / 2))
       if (isMint && !isColdStart && (prize === null || isMiss)) {
-        const mintedAt = await $.clock.now()
-        await update($, minted, () => ({ at: mintedAt, tokens: write }))
+        await mintNow($, flags, await $.clock.now(), write)
       }
       // The reward stands, and goes into the totals as they stand now (another
       // chat may have added to them meanwhile); a miss takes it back.
@@ -1409,10 +1435,26 @@ export const register: Register = (on, options) => {
 
   // Compaction swaps the history for a summary: the old cache no longer
   // matters, and the new prefix is cached by the next message (a small write).
+  // A subagent compacting its own context fires this too, a background one
+  // without agent_id: the chat's transcript says whether the chat compacted,
+  // once its boundary row is written (after this hook, so look again shortly).
   on('classic.PostCompact', async ($, e, next) => {
+    if (e.agent_id) return next(e)
     try {
-      const at = await $.clock.now()
-      await update($, cache, prev => ({ at, ttlMin: prev?.ttlMin ?? DEFAULT_TTL, model: prev?.model, isCompacted: true }))
+      const mark = (at: number) =>
+        update($, cache, prev => ({ at, ttlMin: prev?.ttlMin ?? DEFAULT_TTL, model: prev?.model, isCompacted: true }))
+      const path = flags.transcript || e.transcript_path
+      const info = path ? await fromTranscript($, path).catch(() => null) : null
+      if (info === null) await mark(await $.clock.now())
+      else if (info.isCompacted) await mark(info.at)
+      else {
+        const check = async (tries: number): Promise<void> => {
+          const later = await fromTranscript($, path).catch(() => null)
+          if (later?.isCompacted) await mark(later.at)
+          else if (tries > 1) $.clock.after(5000, () => check(tries - 1))
+        }
+        $.clock.after(2000, () => check(3))
+      }
     } catch {}
     return next(e)
   })
@@ -1466,10 +1508,9 @@ export const register: Register = (on, options) => {
     const info = await read($, cache)
     const kw = await read($, keepWarm)
     const current = await read($, model)
-    // Other chats stay out of the way: a dim count on this chat's line, the
-    // one about to expire named inline, and the list itself on hover.
+    // Other chats stay out of the way: a dim count on this chat's line, and
+    // the list itself on hover.
     const chats = s.otherChats ? otherChatsShown(await read($, others), now) : []
-    const expiring = chats.find(c => c.isExpiring)
     const chatList =
       chats.length > 0 ? (
         <Text key="chat-list" wrap="truncate-end">
@@ -1484,6 +1525,7 @@ export const register: Register = (on, options) => {
         </Text>
       ) : null
     const isStatsOn = (await read($, showStats)) ?? s.stats
+    const hasSound = await isSoundOn($)
     const prize = await read($, reward)
     const isRewarding = Svg !== null && e.surface !== 'terminal' && prize !== null && now - prize.at >= 0 && now - prize.at < REWARD_MS
     const mint = await read($, minted)
@@ -1511,22 +1553,10 @@ export const register: Register = (on, options) => {
       const isCompactOn = kw.isCompactOn ?? s.compact
       const work = await pendingWork($, flags, now)
       const limit = refreshLimit(s, info.ttlMin, info.model, work.count > 0)
-      // While the chat waits on background work: whether keep-warm holds the
-      // cache until it is back, or the cache is about to expire first.
-      const left = liveLeft(info, current, now)
       const used =
         isOn && kw.refreshes > 0
           ? ` · refreshed ${kw.refreshes}/${Math.max(limit, kw.refreshes)}${kw.refreshes >= limit && !kw.stopped && isCompactOn ? ', compacts before it goes cold' : ''}`
           : ''
-      const isHeld = isOn && !kw.stopped && kw.refreshes < limit
-      const workText =
-        work.count === 0 || e.props.isWorking ? null : left !== null && isHeld ? (
-          <Text dimColor wrap="truncate-end">{` · keeping warm for ${work.label}`}</Text>
-        ) : left !== null && left < alertLead(info.ttlMin) ? (
-          <Text color="yellow" wrap="truncate-end">{` · ${work.label} still running; the cache expires first unless kept warm`}</Text>
-        ) : (
-          <Text dimColor wrap="truncate-end">{` · ${work.label} running`}</Text>
-        )
       const recent = Object.entries(await read($, runs))
         .filter(([, run]) => now - run.lastAt < RUNS_SHOWN)
         .sort(([, a], [, b]) => b.startedAt - a.startedAt)
@@ -1602,21 +1632,14 @@ export const register: Register = (on, options) => {
               onPress={() => update($, showStats, () => !isStatsOn)}
             />
           </Box>
-          {/* The extras give way first, and clipped: squeezed to nothing, a text wraps a letter a row. */}
-          {workText ? (
+          <Box flexShrink={0} marginLeft={1}>
+            <Button key="sound-toggle" label={hasSound ? 'Sound: on' : 'Sound: off'} onPress={() => setSound($, flags, !hasSound)} />
+          </Box>
+          {/* The extra gives way first, and clipped: squeezed to nothing, a text wraps a letter a row. */}
+          {isSwapped ? (
             <Box flexShrink={1000} height={1} overflow="hidden" alignItems="flex-start">
-              {workText}
-            </Box>
-          ) : null}
-          {isSwapped || expiring ? (
-            <Box flexShrink={1000} height={1} overflow="hidden" alignItems="flex-start">
-              <Text wrap="truncate-end">
-                {expiring ? <Text>{` · ${expiring.title} expires in ${clock(expiring.left)}`}</Text> : null}
-                {isSwapped ? (
-                  <Text dimColor hover={{ scope: 'others', dimColor: false }}>
-                    {` · ${chats.length} other ${chats.length === 1 ? 'chat' : 'chats'}`}
-                  </Text>
-                ) : null}
+              <Text dimColor wrap="truncate-end" hover={{ scope: 'others', dimColor: false }}>
+                {` · ${chats.length} other ${chats.length === 1 ? 'chat' : 'chats'}`}
               </Text>
             </Box>
           ) : null}

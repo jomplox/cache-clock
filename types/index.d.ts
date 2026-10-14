@@ -45,7 +45,7 @@ export type Miss = { at: number; read: number; total: number }
 export type Mint = { at: number; tokens: number }
 
 /** The reward scene: a prop for an everyday warm return, the hourglass for a close call, the guitar for a milestone. */
-export type RewardVariant = 'piggy' | 'shades' | 'mug' | 'hourglass' | 'guitar'
+export type RewardVariant = 'piggy' | 'shades' | 'mug' | 'gum' | 'tophat' | 'hourglass' | 'guitar'
 
 /** A message the person typed that reused the warm cache, as the band celebrates it. */
 export type Reward = {

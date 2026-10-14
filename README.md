@@ -17,9 +17,9 @@ Claude Code caches your conversation so each new message only pays full price fo
 ## What it shows
 
 - **The countdown.** `● Cache warm · 41:20 left (1h TTL) · 248k cached (≈$0.80 if it goes cold)`. It turns yellow near the end, and becomes `○ Cache cold · expired 3:10 ago` after. It knows the cache's real TTL from the transcript, and that switching models, `/compact` or `/clear` starts a new one.
-- **A new cache.** When a message writes a new cache, an LED panel lights up across the band and breaks away.
+- **A new cache.** When a message writes a new cache, an LED panel lights up across the band and breaks away, to a little tune of its own (mallets and bells, in step with the lights).
 - **A miss.** If a message expected to read the cache didn't, the band says so.
-- **Other chats.** How long each of your other chats' caches has left, and which one expires next.
+- **Other chats.** How many other chats have a cache; hover the count for how long each has left, soonest first (with Stats off, the list shows under the band).
 - **Stats** (toggle in the band). What going cold would cost compared with reading the cache warm, how much of this chat was read from cache, how often it was rebuilt, and charts of both. And what this chat and its subagents spent today and this week (your plan's weekly window, else the last 7 days), at list price.
 - **Subagents and workflows.** Their caches, and what a running workflow has read from cache.
 
@@ -33,13 +33,17 @@ If keep-warm is off (or has spent its refreshes), you get a toast (and a sound) 
 
 Turn on compacting for a chat (the **Compact** band button) and, about 2 minutes before the cache expires (1 minute for a 5-minute cache), the mod **compacts the chat while the cache is still warm**, so your next message writes only the summary instead of the whole history. With keep-warm on, that happens once its refreshes are spent; with it off, right away, for chats of 30k tokens or more (a smaller one costs about as much to summarize as to re-cache). The expiry alert says it will. Sending a message first keeps the full history.
 
+### Sound
+
+The **Sound** button in the band mutes every sound the mod makes (the new-cache sound, the reward's, the expiry alert's) in every chat, until you press it again.
+
 ### The reward
 
 A message **you typed** that reuses a warm cache plays a 4-second scene in the band, and `Saved $x` rolls up like an odometer beside it, with what the prompt itself cost, what you've saved today and how many warm returns in a row:
 
 | When | Scene |
 |---|---|
-| Most messages, in turn | A **piggy bank** swallowing the coin, **sunglasses** dropping onto Clawd, a **mug** whose steam turns into a heart |
+| Most messages, in turn | A **piggy bank** swallowing the coin, **sunglasses** dropping onto Clawd, a **mug** whose steam turns into a heart, a **bubblegum** bubble that pops all over his face, a **top hat** and a monocle that pops out when he sees the total |
 | Close call (under 5 minutes left) | Clawd sprints in and flips a nearly empty **hourglass**: `with 0:41 to spare` |
 | Milestone ($10, $25, $50 … saved today, or every 25 in a row) | Clawd plays the **guitar** |
 
