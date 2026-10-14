@@ -91,7 +91,14 @@ type Flags = {
   jingle: AbortController | null
   // The new-cache sound, likewise.
   chime: AbortController | null
+  /** What the last main request sent ahead of the conversation; null until one ran. */
+  prompt: PromptPrint | null
 }
+
+// What a main request sends ahead of the conversation, where a change
+// rewrites the cache from that point: the tools in order with their
+// descriptions, the system prompt's sections, and the effort asked for.
+type PromptPrint = { tools: { name: string; text: string }[]; sections: Record<string, string>; effort?: string }
 
 // The main conversation's requests, from its transcript: what they read from
 // cache, how often the cache was written again whole, and the pauses between them.
@@ -629,6 +636,49 @@ const kTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(
 const LABEL_MAX = 120
 const short = (text: string, max = 28) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text)
 
+async function promptPrint($: EngineInterface, effort: unknown): Promise<PromptPrint | null> {
+  try {
+    const [tools, composed] = await Promise.all([$.tool.list(), $.prompt.compose()])
+    return {
+      tools: tools.map(t => ({ name: t.name, text: t.description })),
+      sections: Object.fromEntries(composed.sections.map(s => [s.id, s.text])),
+      effort: effort === undefined ? undefined : String(effort),
+    }
+  } catch {
+    return null
+  }
+}
+
+// Why a request read less than was cached, as far as the two prints differ:
+// an MCP server that connected or left, tools added or removed, a tool's
+// description, a section of the system prompt, the effort. Nothing when they
+// match: the cause is not one this side can see.
+function missCause(a: PromptPrint, b: PromptPrint): string | undefined {
+  const few = (xs: string[]) => (xs.length > 2 ? `${xs.slice(0, 2).join(', ')} +${xs.length - 2}` : xs.join(', '))
+  const server = (name: string) => /^mcp__(.+?)__/.exec(name)?.[1]
+  const servers = (p: PromptPrint) => new Set(p.tools.map(t => server(t.name)).filter((x): x is string => !!x))
+  const [sa, sb] = [servers(a), servers(b)]
+  const causes: string[] = []
+  const joined = [...sb].filter(x => !sa.has(x))
+  const left = [...sa].filter(x => !sb.has(x))
+  if (joined.length) causes.push(`MCP ${few(joined)} connected`)
+  if (left.length) causes.push(`MCP ${few(left)} disconnected`)
+  // Tools of a server on both sides, and the built-in ones.
+  const counted = (n: string) => !server(n) || (sa.has(server(n)!) && sb.has(server(n)!))
+  const textOf = new Map(a.tools.map(t => [t.name, t.text]))
+  const names = new Set(b.tools.map(t => t.name))
+  const added = b.tools.filter(t => !textOf.has(t.name) && counted(t.name)).map(t => t.name)
+  const removed = a.tools.filter(t => !names.has(t.name) && counted(t.name)).map(t => t.name)
+  const reworded = b.tools.filter(t => textOf.has(t.name) && textOf.get(t.name) !== t.text).map(t => t.name)
+  if (added.length) causes.push(`tool${added.length > 1 ? 's' : ''} added (${few(added)})`)
+  if (removed.length) causes.push(`tool${removed.length > 1 ? 's' : ''} removed (${few(removed)})`)
+  if (reworded.length) causes.push(`${few(reworded)} tool description changed`)
+  const ids = [...new Set([...Object.keys(a.sections), ...Object.keys(b.sections)])].filter(id => a.sections[id] !== b.sections[id])
+  if (ids.length) causes.push(`system prompt changed (${few(ids)})`)
+  if (a.effort !== b.effort) causes.push(`effort changed (${a.effort ?? 'default'} → ${b.effort ?? 'default'})`)
+  return causes.length ? causes.join('; ') : undefined
+}
+
 // Time left on a cache the next message would read: null when it has expired,
 // was replaced by a compaction, or belongs to a model the session left.
 function liveLeft(info: CacheInfo | null, current: string | null, now: number): number | null {
@@ -1099,7 +1149,7 @@ function otherChatsShown(
 
 export const register: Register = (on, options) => {
   const s = settings(options)
-  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null }
+  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, prompt: null }
 
   // Also runs on a mod (re)load inside an open chat: seed from its transcript so
   // the band shows before the next message.
@@ -1285,6 +1335,8 @@ export const register: Register = (on, options) => {
     if (flags.isForking && !(e.index === 0 && flags.isTyped)) return yield* next(e)
 
     flags.isRunning = true
+    // Taken while the request goes out; compared once it is answered.
+    const printing = promptPrint($, e.effort)
     const at = await $.clock.now()
     const prev = await read($, cache)
     const expected = e.index === 0 && prev !== null && liveLeft(prev, bare(e.model), at) !== null ? prev.tokens : undefined
@@ -1308,6 +1360,9 @@ export const register: Register = (on, options) => {
     }
 
     const result = yield* next(e)
+    const before = flags.prompt
+    const print = await printing
+    if (print) flags.prompt = print
     // No response (the request failed or was cut off before one): the cache
     // is where it was.
     if (result.stopReason === null) await update($, cache, () => prev)
@@ -1320,7 +1375,8 @@ export const register: Register = (on, options) => {
       let isMiss = false
       if (e.index === 0) {
         isMiss = expected !== undefined && expected >= 4096 && hit < expected / 2
-        await update($, miss, () => (isMiss ? { at, read: hit, total: expected } : null))
+        const cause = isMiss && before && print ? missCause(before, print) : undefined
+        await update($, miss, () => (isMiss && expected !== undefined ? { at, read: hit, total: expected, cause } : null))
       }
       // A new cache: the turn opened on a cold one (or missed it) and wrote
       // the prefix, or any request wrote most of its prompt.
@@ -1706,7 +1762,7 @@ export const register: Register = (on, options) => {
     if (missed !== null) {
       rows.push(
         <Box key="miss">
-          <Text color="yellow">⚠ Last message missed the cache</Text>
+          <Text color="yellow">{missed.cause ? `⚠ Missed the cache: ${missed.cause}` : '⚠ Last message missed the cache'}</Text>
           <Text dimColor>
             {' '}
             · read {kTokens(missed.read)} of ~{kTokens(missed.total)} cached tokens; the rest was written again

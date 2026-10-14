@@ -42,6 +42,8 @@ function engine(on: On) {
     rateLimits: [] as { kind: string; percentUsed: number; resetsAt?: string }[],
     stopReason: 'end_turn' as string | null,
     agents: [] as { id: string; description: string; type: string; status: string }[],
+    tools: null as { name: string; description: string; mcp: boolean }[] | null,
+    sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }],
   }
   on('ui.render', ($$, e) => {
     const { Box } = $$.ui.resolve(e)
@@ -58,6 +60,11 @@ function engine(on: On) {
   on('classic.PostModelSwitch', () => ({}))
   on('classic.SubagentStop', () => ({}))
   on('agent.list', () => ({ value: world.agents }))
+  on('tool.list', () => {
+    if (world.tools === null) throw new Error('no tools here')
+    return { value: world.tools }
+  })
+  on('prompt.compose', () => ({ sections: world.sections }))
   on('turn.step', async function* (_$, e) {
     const u = world.stepUsage.shift() ?? null
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: world.stopReason as any, usage: u && { ...u, model: e.model } }
@@ -402,6 +409,36 @@ test('a message that should have read the cache but did not is flagged', async (
   await send($)
   const hit = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
   expect(await hit.find({ text: /missed the cache/ })).toBeUndefined()
+})
+
+test('a miss names what changed ahead of the conversation since the request before', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  const tool = (name: string, description = name) => ({ name, description, mcp: name.startsWith('mcp__') })
+  world.tools = [tool('Bash'), tool('Read')]
+  world.stepUsage.push(usage(0, 100_000), usage(1_000, 100_000), usage(1_000, 100_000), usage(1_000, 100_000))
+  await send($)
+
+  // An MCP server connected between the two messages.
+  world.tools = [tool('Bash'), tool('Read'), tool('mcp__github__search'), tool('mcp__github__pr')]
+  await clock.advance(60_000)
+  await send($)
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: '⚠ Missed the cache: MCP github connected' })).toBeDefined()
+
+  // A section of the system prompt changed, and a tool's description.
+  world.sections = [...world.sections, { id: 'memory', text: 'Remember this.', scope: 'shared' }]
+  world.tools = world.tools.map(t => (t.name === 'Read' ? tool('Read', 'Reads files.') : t))
+  await clock.advance(60_000)
+  await send($)
+  const again = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await again.find({ text: '⚠ Missed the cache: Read tool description changed; system prompt changed (memory)' })).toBeDefined()
+
+  // Nothing this side can see changed: no cause is guessed.
+  await clock.advance(60_000)
+  await send($)
+  const plain = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await plain.find({ text: '⚠ Last message missed the cache' })).toBeDefined()
 })
 
 test("other chats' caches show in the band, this chat's is published", async ($, on) => {

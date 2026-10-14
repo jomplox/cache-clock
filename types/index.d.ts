@@ -39,7 +39,13 @@ export type KeepWarm = {
 }
 
 /** A request that was predicted warm but read little from cache. */
-export type Miss = { at: number; read: number; total: number }
+export type Miss = {
+  at: number
+  read: number
+  total: number
+  /** What changed ahead of the conversation since the request before, when something did. */
+  cause?: string
+}
 
 /** A request that wrote this chat's prefix to cache from scratch. */
 export type Mint = { at: number; tokens: number }
