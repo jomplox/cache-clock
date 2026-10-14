@@ -547,6 +547,19 @@ test('the band shows cache stats under this chat, and a wide band two subagents 
   expect(await narrow.find({ text: /≈40×/ })).toBeDefined()
 })
 
+test("a new chat, whose transcript did not exist yet when it started, shows its stats once a turn names it", async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000_000 })
+  const world = engine(on)
+  world.stats = [[1_000, 10, 0, 50_000], [1_060, 'U'], [1_070, 10, 50_000, 1_000]].map(r => r.join('\t')).join('\n')
+  await start($)
+  world.stepUsage.push(usage(0, 50_000))
+  await send($)
+  await $.classic.Stop({ transcript_path: '/p/self.jsonl' } as any)
+  await clock.advance(1_000)
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'terminal', ...BAND(false) })
+  expect(await band.find({ text: /^ 49% · no rebuilds$/ })).toBeDefined()
+})
+
 test('a request that got no response leaves the timer where it was', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)

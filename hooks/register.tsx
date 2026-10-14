@@ -1364,6 +1364,9 @@ export const register: Register = (on, options) => {
     try {
       if (!e.agent_id) {
         flags.isRunning = false
+        // A new chat's transcript is written with its first message, after the
+        // session started and looked for it: the turn names it.
+        if (!flags.transcript && e.transcript_path) flags.transcript = e.transcript_path
         const tokens = await $.session
           .usage()
           .then(u => u.context.tokens)
