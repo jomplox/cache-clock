@@ -44,6 +44,7 @@ function engine(on: On) {
     agents: [] as { id: string; description: string; type: string; status: string }[],
     tools: [] as { name: string; description: string; mcp: boolean }[],
     sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }],
+    soundReads: 0,
   }
   on('ui.render', ($$, e) => {
     const { Box } = $$.ui.resolve(e)
@@ -102,7 +103,10 @@ function engine(on: On) {
     world.sounds.push('asset' in e.clip ? e.clip.asset : '')
     return { value: undefined }
   })
-  on('store.get', (_$, e) => ({ value: world.store.get(e.key) }))
+  on('store.get', (_$, e) => {
+    if (e.key === 'sound') world.soundReads += 1
+    return { value: world.store.get(e.key) }
+  })
   on('store.set', (_$, e) => {
     world.store.set(e.key, e.value)
     return { value: undefined }
@@ -815,6 +819,21 @@ test('the Sound button mutes every sound of the mod, in every chat, until presse
   await clock.advance(2 * 3_600_000)
   await send($)
   expect(world.sounds).toEqual(['sounds/mint.wav'])
+})
+
+test("drawing the band reads the Sound setting from memory; another chat's press shows within 2s", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  await start($)
+  await send($)
+  await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  const reads = world.soundReads
+  for (let i = 0; i < 5; i++) await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(world.soundReads).toBe(reads)
+  world.store.set('sound', false)
+  await clock.advance(2_000)
+  const elsewhere = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await elsewhere.find({ text: 'Sound: off' })).toBeDefined()
 })
 
 test('a reward goes into the totals as another chat left them; no response takes it back', async ($, on) => {

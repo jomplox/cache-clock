@@ -93,6 +93,8 @@ type Flags = {
   chime: AbortController | null
   /** When the last main request was sent, refreshes aside; 0 until one was. */
   askedAt: number
+  /** The Sound button's setting as the store last had it; null until read. */
+  hasSound: boolean | null
   /** Every chat's week, as their sessions published it; null until read. */
   week: { saved: number; spent: number } | null
   /** What the last main request sent ahead of the conversation; null until one ran. */
@@ -918,6 +920,7 @@ const isSoundOn = async ($: EngineInterface) => (await $.store.get(SOUND_KEY).ca
 
 async function setSound($: EngineInterface, flags: Flags, isOn: boolean): Promise<void> {
   await $.store.set(SOUND_KEY, isOn)
+  flags.hasSound = isOn
   if (!isOn) {
     flags.jingle?.abort()
     flags.chime?.abort()
@@ -1209,7 +1212,7 @@ function otherChatsShown(
 
 export const register: Register = (on, options) => {
   const s = settings(options)
-  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, askedAt: 0, week: null, prompt: null }
+  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, askedAt: 0, hasSound: null, week: null, prompt: null }
 
   // Also runs on a mod (re)load inside an open chat: seed from its transcript so
   // the band shows before the next message.
@@ -1239,6 +1242,9 @@ export const register: Register = (on, options) => {
       .register({ name: 'cache-clock-demo', description: 'Replay the new-cache animation, or each reward scene, for a minute', argumentHint: '[reward]', immediate: true })
       .catch(() => {})
     $.clock.every(2000, () => {
+      isSoundOn($)
+        .then(isOn => void (flags.hasSound = isOn))
+        .catch(() => {})
       syncAgents($, flags).catch(() => {})
       replayDemo($, s, flags).catch(() => {})
     })
@@ -1652,7 +1658,8 @@ export const register: Register = (on, options) => {
         </Text>
       ) : null
     const isStatsOn = (await read($, showStats)) ?? s.stats
-    const hasSound = await isSoundOn($)
+    // Read from the store every 2s, not every frame; another chat's press shows then.
+    const hasSound = flags.hasSound ?? (flags.hasSound = await isSoundOn($))
     const prize = await read($, reward)
     const isRewarding = Svg !== null && e.surface !== 'terminal' && prize !== null && now - prize.at >= 0 && now - prize.at < REWARD_MS
     const mint = await read($, minted)
