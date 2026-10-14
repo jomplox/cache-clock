@@ -91,6 +91,8 @@ type Flags = {
   jingle: AbortController | null
   // The new-cache sound, likewise.
   chime: AbortController | null
+  /** When the last main request was sent, refreshes aside; 0 until one was. */
+  askedAt: number
   /** What the last main request sent ahead of the conversation; null until one ran. */
   prompt: PromptPrint | null
 }
@@ -794,9 +796,26 @@ function refreshLimit(s: Settings, ttlMin: number, modelId: string | null | unde
 const keepLabel = (prev: AgentCache | undefined, label: string) =>
   prev?.label && prev.label !== 'subagent' && !(prev.label.endsWith('…') && label.length > prev.label.length) ? prev.label : label
 
-async function setKeepWarm($: EngineInterface, isOn: boolean): Promise<void> {
-  await update($, keepWarm, kw => ({ isOn, isCompactOn: kw.isCompactOn, refreshes: 0 }))
+async function setKeepWarm($: EngineInterface, isOn: boolean, isAuto = false): Promise<void> {
+  await update($, keepWarm, kw => ({ isOn, isAuto: isOn && isAuto, isCompactOn: kw.isCompactOn, refreshes: 0 }))
 }
+
+// Auto keep-warm's call, from this chat's pauses: of those that lasted at
+// least as long as this one has so far, the share that ended before a refresh
+// sent now would run out. A refresh reads the conversation and a return to a
+// cold cache writes it again, so the refresh pays when that share is at least
+// the read's price over the write's.
+const AUTO_MIN_PAUSES = 4
+function isRefreshWorthIt(stats: ChatStats | null, away: number, ttlMin: number, modelId: string | null | undefined): boolean {
+  const longer = (stats?.pauses ?? []).filter(ms => ms >= away)
+  if (longer.length < AUTO_MIN_PAUSES) return false
+  const back = longer.filter(ms => ms <= away + ttlMin * 60_000).length
+  return back / longer.length >= price(modelId).read / writeMult(ttlMin)
+}
+
+// Whether keep-warm is done refreshing this cache: its refreshes spent, or
+// auto found the next one would not pay.
+const isSpent = (kw: KeepWarm, limit: number) => kw.refreshes >= limit || kw.isDeclined === true
 
 // One tool-less request over the conversation that reads its cache, which
 // resets the cache's timer. Pauses keep-warm until the next message when it
@@ -951,7 +970,13 @@ async function maybeRefresh($: EngineInterface, s: Settings, flags: Flags): Prom
   const left = liveLeft(info, await read($, model), sentAt)
   if (info === null || left === null || left > refreshLead(info.ttlMin)) return
   const work = await pendingWork($, flags, sentAt)
-  if (kw.refreshes >= refreshLimit(s, info.ttlMin, info.model, work.count > 0)) return
+  if (isSpent(kw, refreshLimit(s, info.ttlMin, info.model, work.count > 0))) return
+  // While work this chat waits on runs, auto holds the cache as on does.
+  if (kw.isAuto && work.count === 0 && !isRefreshWorthIt(flags.stats, sentAt - (flags.askedAt || info.at), info.ttlMin, info.model)) {
+    await update($, keepWarm, prev => ({ ...prev, isDeclined: true }))
+    await logLine($, flags, sentAt, 'auto keep-warm: no refresh, pauses this long seldom end in time')
+    return
+  }
   await refresh($, flags, sentAt)
 }
 
@@ -971,8 +996,8 @@ async function maybeCompact($: EngineInterface, s: Settings, flags: Flags): Prom
   if (isOn) {
     const work = await pendingWork($, flags, now)
     const limit = refreshLimit(s, info.ttlMin, info.model, work.count > 0)
-    if (kw.refreshes < limit) return
-    why = `after ${kw.refreshes}/${limit} refreshes`
+    if (!isSpent(kw, limit)) return
+    why = kw.isDeclined ? `where auto keep-warm would not refresh` : `after ${kw.refreshes}/${limit} refreshes`
   } else {
     if ((info.tokens ?? 0) < COMPACT_MIN) return
     why = 'with keep-warm off'
@@ -1016,7 +1041,7 @@ async function maybeAlert($: EngineInterface, s: Settings, flags: Flags): Promis
   if ((await read($, alertedAt)) === info.at) return
   const kw = await read($, keepWarm)
   const work = await pendingWork($, flags, await $.clock.now())
-  if ((kw.isOn ?? s.keepWarm) && !kw.stopped && ((kw.isCompactOn ?? s.compact) || kw.refreshes < refreshLimit(s, info.ttlMin, info.model, work.count > 0))) return
+  if ((kw.isOn ?? s.keepWarm) && !kw.stopped && ((kw.isCompactOn ?? s.compact) || !isSpent(kw, refreshLimit(s, info.ttlMin, info.model, work.count > 0)))) return
 
   await update($, alertedAt, () => info.at)
   const name = flags.label ? `"${short(flags.label, 40)}"` : 'this chat'
@@ -1149,7 +1174,7 @@ function otherChatsShown(
 
 export const register: Register = (on, options) => {
   const s = settings(options)
-  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, prompt: null }
+  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, askedAt: 0, prompt: null }
 
   // Also runs on a mod (re)load inside an open chat: seed from its transcript so
   // the band shows before the next message.
@@ -1173,7 +1198,7 @@ export const register: Register = (on, options) => {
     refreshStats($, flags, true).catch(() => {})
 
     await $.command
-      .register({ name: 'keep-warm', description: "Keep this chat's prompt cache warm while idle (on/off)", argumentHint: '[on|off|now]', immediate: true })
+      .register({ name: 'keep-warm', description: "Keep this chat's prompt cache warm while idle (on/auto/off)", argumentHint: '[on|auto|off|now]', immediate: true })
       .catch(() => {})
     await $.command
       .register({ name: 'cache-clock-demo', description: 'Replay the new-cache animation, or each reward scene, for a minute', argumentHint: '[reward]', immediate: true })
@@ -1230,12 +1255,15 @@ export const register: Register = (on, options) => {
       if (liveLeft(await read($, cache), await read($, model), now) === null) return { text: 'The cache is cold: send a message first.' }
       return { text: `Keep-warm: ${await refresh($, flags, now)}.` }
     }
-    const isOn = arg === 'on' ? true : arg === 'off' ? false : !(kw.isOn ?? s.keepWarm)
-    await setKeepWarm($, isOn)
+    const isOn = arg === 'on' || arg === 'auto' ? true : arg === 'off' ? false : !(kw.isOn ?? s.keepWarm)
+    await setKeepWarm($, isOn, arg === 'auto')
     return {
-      text: isOn
-        ? `Keep-warm on: up to ${s.keepWarmMax} refreshes after your last message, each shortly before the cache expires.`
-        : 'Keep-warm off for this chat.',
+      text:
+        arg === 'auto'
+          ? `Keep-warm auto: up to ${s.keepWarmMax} refreshes after your last message, each only when your pauses in this chat say you are likely back before it runs out.`
+          : isOn
+            ? `Keep-warm on: up to ${s.keepWarmMax} refreshes after your last message, each shortly before the cache expires.`
+            : 'Keep-warm off for this chat.',
     }
   })
 
@@ -1342,7 +1370,9 @@ export const register: Register = (on, options) => {
     const expected = e.index === 0 && prev !== null && liveLeft(prev, bare(e.model), at) !== null ? prev.tokens : undefined
     await update($, cache, p => ({ at, ttlMin: p?.ttlMin ?? DEFAULT_TTL, model: bare(e.model), tokens: p?.tokens }))
     await update($, model, () => bare(e.model))
-    if (e.index === 0) await update($, keepWarm, kw => ({ isOn: kw.isOn, isCompactOn: kw.isCompactOn, refreshes: 0 }))
+    if (e.index === 0) await update($, keepWarm, kw => ({ isOn: kw.isOn, isAuto: kw.isAuto, isCompactOn: kw.isCompactOn, refreshes: 0 }))
+    // Where the person's pause starts, if this is the turn's last request.
+    flags.askedAt = at
     // A turn opening with no warm cache will write a new one: mint now, as the
     // person sends, rather than when the first response ends.
     const isColdStart = e.index === 0 && expected === undefined
@@ -1612,10 +1642,14 @@ export const register: Register = (on, options) => {
       const isCompactOn = kw.isCompactOn ?? s.compact
       const work = await pendingWork($, flags, now)
       const limit = refreshLimit(s, info.ttlMin, info.model, work.count > 0)
-      const used =
-        isOn && kw.refreshes > 0
-          ? ` · refreshed ${kw.refreshes}/${Math.max(limit, kw.refreshes)}${kw.refreshes >= limit && !kw.stopped && isCompactOn ? ', compacts before it goes cold' : ''}`
-          : ''
+      const compacts = isSpent(kw, limit) && !kw.stopped && isCompactOn ? ', compacts before it goes cold' : ''
+      const used = !isOn
+        ? ''
+        : kw.isDeclined
+          ? ` · auto: no refresh, you are seldom back in time${compacts}`
+          : kw.refreshes > 0
+            ? ` · refreshed ${kw.refreshes}/${Math.max(limit, kw.refreshes)}${compacts}`
+            : ''
       const recent = Object.entries(await read($, runs))
         .filter(([, run]) => now - run.lastAt < RUNS_SHOWN)
         .sort(([, a], [, b]) => b.startedAt - a.startedAt)
@@ -1675,7 +1709,12 @@ export const register: Register = (on, options) => {
             <Text dimColor>{used}</Text>
           </Box>
           <Box flexShrink={0} marginLeft={2}>
-            <Button key="keep-warm" label={isOn ? 'Keep-warm: on' : 'Keep-warm: off'} onPress={() => setKeepWarm($, !isOn)} />
+            {/* Off, on, auto, and round again. */}
+            <Button
+              key="keep-warm"
+              label={!isOn ? 'Keep-warm: off' : kw.isAuto ? 'Keep-warm: auto' : 'Keep-warm: on'}
+              onPress={() => setKeepWarm($, !isOn || !kw.isAuto, isOn && !kw.isAuto)}
+            />
           </Box>
           <Box flexShrink={0} marginLeft={1}>
             <Button

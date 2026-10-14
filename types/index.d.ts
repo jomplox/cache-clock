@@ -28,6 +28,10 @@ export type AgentCache = {
 export type KeepWarm = {
   /** null follows the `keepWarm` option; true or false is this chat's own pick. */
   isOn: boolean | null
+  /** On, refreshing only when this chat's pauses say the person is likely back before the refresh runs out. */
+  isAuto?: boolean
+  /** Auto found the next refresh would not pay: done with this cache until the next message. */
+  isDeclined?: boolean
   /** Whether it compacts the chat before the cache goes cold; absent follows the `autoCompact` option. */
   isCompactOn?: boolean
   /** Refreshes sent since the last message of the person's. */

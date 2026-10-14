@@ -27,6 +27,8 @@ Claude Code caches your conversation so each new message only pays full price fo
 
 Turn on keep-warm for a chat (band button, or `/keep-warm on`) and, shortly before the cache expires, the mod sends one small request that reads it and resets its timer. That costs a cache read, about a twentieth of re-writing it. After a set number of refreshes (3 by default), it stops, and the cache goes cold with the alert below, unless compacting is on. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that's cheaper than re-caching.
 
+Press the button again for **auto** (or `/keep-warm auto`): it refreshes only when your past pauses in this chat say you're likely back before the refresh runs out. Of the pauses that lasted at least as long as this one has so far, enough must have ended in time to pay for the refresh (a read costs a small fraction of a rewrite). With fewer than 4 such pauses on record, it doesn't refresh. Where it holds off, the band says so, and the alert or compacting follows as if its refreshes were spent. The button goes off → on → auto → off.
+
 If keep-warm is off (or has spent its refreshes), you get a toast (and a sound) about 5 minutes before the cache expires (1 minute for a 5-minute cache).
 
 ### Compact
@@ -78,7 +80,7 @@ Asked when you install. To change one later, from a terminal: `echo '{"reward":"
 
 ## Commands
 
-- `/keep-warm [on|off|now]`: turn keep-warm on or off for this chat, or refresh the cache right away.
+- `/keep-warm [on|auto|off|now]`: turn keep-warm on, auto or off for this chat, or refresh the cache right away.
 - `/cache-clock-demo [reward]`: replay the new-cache animation, or each reward scene, for a minute.
 
 ## What it keeps

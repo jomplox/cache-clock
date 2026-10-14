@@ -375,6 +375,65 @@ test('keep-warm stops itself when a refresh reads little from cache', { options:
   expect(world.forks).toBe(2)
 })
 
+// A transcript's requests with the person's pauses between them, in minutes.
+const paused = (minutes: number[]) => {
+  const rows: (string | number)[][] = [[1_000, 10, 0, 50_000]]
+  let t = 1_000
+  for (const m of minutes) {
+    t += m * 60
+    rows.push([t - 1, 'U'], [t, 10, 50_000, 100])
+  }
+  return rows.map(r => r.join('\t')).join('\n')
+}
+
+test('the keep-warm button goes off, on, auto; auto refreshes only while this chat\'s pauses say you are likely back in time', { options: { keepWarm: false, keepWarmMax: 3 }, timeoutMs: 15_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 100_000_000 })
+  const world = engine(on)
+  world.stats = paused([70, 75, 80, 90, 100])
+  await start($)
+  await send($)
+  await $.classic.Stop({ transcript_path: '/p/self.jsonl' } as any)
+
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: 'Keep-warm: off' })).toBeDefined()
+  await band.press({ key: 'keep-warm' })
+  expect(await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).find({ text: 'Keep-warm: on' })).toBeDefined()
+  await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).press({ key: 'keep-warm' })
+  expect(await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).find({ text: 'Keep-warm: auto' })).toBeDefined()
+
+  // Every past pause past an hour ended within the next: one refresh.
+  await clock.advance(59 * 60_000)
+  expect(world.forks).toBe(1)
+  // None lasted past two hours and ended in the third: no second one, and
+  // the expiry alert goes out as it would with keep-warm spent.
+  await clock.advance(60 * 60_000)
+  expect(world.forks).toBe(1)
+  const declined = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await declined.find({ text: ' · auto: no refresh, you are seldom back in time' })).toBeDefined()
+  expect(world.toasts).toEqual([expect.stringMatching(/expires in \d:\d\d: send a message to keep it$/)])
+
+  // The next message starts over, auto kept.
+  await send($)
+  const again = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await again.find({ text: 'Keep-warm: auto' })).toBeDefined()
+  expect(await again.find({ text: / · auto: no refresh/ })).toBeUndefined()
+
+  await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).press({ key: 'keep-warm' })
+  expect(await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).find({ text: 'Keep-warm: off' })).toBeDefined()
+})
+
+test('auto keep-warm does not refresh a chat whose pauses run long', { options: { keepWarm: false } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 100_000_000 })
+  const world = engine(on)
+  world.stats = paused([600, 700, 800, 900, 30])
+  await start($)
+  await send($)
+  await $.classic.Stop({ transcript_path: '/p/self.jsonl' } as any)
+  expect((await $.command.run({ command: 'keep-warm', args: 'auto' })).text).toMatch(/^Keep-warm auto: /)
+  await clock.advance(59 * 60_000)
+  expect(world.forks).toBe(0)
+})
+
 test('keep-warm switched off by option, then on per chat', { options: { keepWarm: false } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
