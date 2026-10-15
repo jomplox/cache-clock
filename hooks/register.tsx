@@ -222,7 +222,10 @@ async function addSavedToday($: EngineInterface, at: number, saved: number): Pro
 const usd = (n: number) => `$${n.toFixed(n >= 100 ? 0 : 2)}`
 
 // Stats are read again at most this often: a long transcript takes seconds.
+// Until there are any, sooner: a chat another started opens on an empty
+// transcript, and its first turn can run long.
 const STATS_EVERY = 5 * 60_000
+const STATS_FIRST_EVERY = 60_000
 
 function parseStats(stdout: string): ChatStats | null {
   const stats: ChatStats = { read: 0, total: 0, rebuilds: 0, rewritten: 0, pauses: [], requests: [], gaps: [] }
@@ -267,7 +270,7 @@ function parseStats(stdout: string): ChatStats | null {
 async function refreshStats($: EngineInterface, flags: Flags, isForced = false): Promise<void> {
   if (!flags.transcript) return
   const now = await $.clock.now()
-  if (!isForced && now - flags.statsAt < STATS_EVERY) return
+  if (!isForced && now - flags.statsAt < (flags.stats ? STATS_EVERY : STATS_FIRST_EVERY)) return
   flags.statsAt = now
   const out = await $.process.run(['/bin/sh', '-c', STATS_SCRIPT, 'sh', flags.transcript]).catch(() => null)
   if (out && out.exitCode === 0 && !out.isStdoutTruncated) flags.stats = parseStats(out.stdout) ?? flags.stats
@@ -607,6 +610,21 @@ async function fromTranscript($: EngineInterface, path: string, isAgent = false)
   if (info === null) return null
   const base = { ...info, ttlMin: ttlMin ?? (isAgent ? AGENT_TTL : DEFAULT_TTL) }
   return compactedAt === null ? base : { ...base, at: compactedAt, tokens: undefined, isCompacted: true }
+}
+
+// Whether the chat compacted after `since`: a message sent as it compacts can
+// go out before the compaction reaches the mod's record.
+async function compactedSince($: EngineInterface, path: string, since: number): Promise<boolean> {
+  const tail = path ? await $.process.run(['tail', '-c', '3000000', path]).catch(() => null) : null
+  return (tail?.stdout ?? '').split('\n').some(line => {
+    if (!line.includes('"compact_boundary"')) return false
+    try {
+      const row = JSON.parse(line)
+      return row.subtype === 'compact_boundary' && !row.isSidechain && Date.parse(row.timestamp) > since
+    } catch {
+      return false
+    }
+  })
 }
 
 // A response's rows are stamped as each block completes; its request was sent
@@ -1118,6 +1136,13 @@ async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise
     }
     list.push({ id: key.slice(CHAT_KEY.length), label: String(v.label ?? 'chat'), at: v.at, ttlMin: v.ttlMin === 5 ? 5 : 60, tokens: v.tokens, isCompacted: v.isCompacted })
   }
+  // A side chat's transcript carries its parent's title: one entry per title,
+  // the latest cache, and none under this chat's own.
+  const latest = new Map<string, OtherChat>()
+  for (const c of list) {
+    const seen = latest.get(c.label)
+    if (c.label !== flags.label && (!seen || c.at > seen.at)) latest.set(c.label, c)
+  }
   if (since !== undefined) {
     const days = ((await $.store.get(SAVED_DAYS_KEY).catch(() => undefined)) ?? {}) as Record<string, number>
     const first = dayKey(since)
@@ -1126,7 +1151,8 @@ async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise
   }
   // Unchanged, no write: a write redraws the band, restarting an animation.
   const prev = await read($, others)
-  if (JSON.stringify(prev) !== JSON.stringify(list)) await update($, others, () => list)
+  const shown = [...latest.values()]
+  if (JSON.stringify(prev) !== JSON.stringify(shown)) await update($, others, () => shown)
 }
 
 // The main conversation's line: the status whole, the rest one clipped row
@@ -1254,6 +1280,7 @@ export const register: Register = (on, options) => {
         .catch(() => {})
       maybeAlert($, s, flags).catch(() => {})
       syncChats($, s, flags).catch(() => {})
+      if (flags.stats === null) refreshStats($, flags).catch(() => {})
     })
     await syncChats($, s, flags).catch(() => {})
     return next(e)
@@ -1444,21 +1471,27 @@ export const register: Register = (on, options) => {
       await update($, cache, p => p && { ...p, tokens: total })
       // What was cached before this message should have been read whole.
       let isMiss = false
+      let isCompaction = false
       if (e.index === 0) {
         isMiss = expected !== undefined && expected >= 4096 && hit < expected / 2
+        // The cache it missed was replaced by a compaction: a new one, no miss.
+        if (isMiss && prev !== null && (await compactedSince($, flags.transcript, prev.at))) [isMiss, isCompaction] = [false, true]
         const cause = isMiss && before && print ? missCause(before, print) : undefined
         await update($, miss, () => (isMiss && expected !== undefined ? { at, read: hit, total: expected, cause } : null))
       }
       // A new cache: the turn opened on a cold one (or missed it) and wrote
       // the prefix, or any request wrote most of its prompt.
       const write = usage.cache_creation_input_tokens ?? 0
-      const isMint = write >= 1024 && ((e.index === 0 && (expected === undefined || isMiss)) || (write >= 4096 && write > total / 2))
-      if (isMint && !isColdStart && (prize === null || isMiss)) {
+      const isMint = write >= 1024 && ((e.index === 0 && (expected === undefined || isMiss || isCompaction)) || (write >= 4096 && write > total / 2))
+      if (isMint && !isColdStart && (prize === null || isMiss || isCompaction)) {
         await mintNow($, flags, await $.clock.now(), write)
       }
       // The reward stands, and goes into the totals as they stand now (another
       // chat may have added to them meanwhile); a miss takes it back.
-      if (prize !== null) {
+      if (prize !== null && isCompaction) {
+        // Typed onto the summary, not the warm cache: nothing to reward.
+        await takeBack($, flags, prize)
+      } else if (prize !== null) {
         const won = prize
         const totals = await readTotals($, won.at)
         if (isMiss) await takeBack($, flags, won)
@@ -1821,7 +1854,7 @@ export const register: Register = (on, options) => {
         )
       } else if (chatList !== null) {
         rows.push(
-          <Box key="detail" height={1} overflow="hidden">
+          <Box key="detail" height={1} overflow="hidden" alignItems="flex-start">
             {chatList}
           </Box>,
         )
@@ -1836,7 +1869,7 @@ export const register: Register = (on, options) => {
       }
     } else if (chatList !== null) {
       rows.push(
-        <Box key="detail" height={1} overflow="hidden">
+        <Box key="detail" height={1} overflow="hidden" alignItems="flex-start">
           {chatList}
         </Box>,
       )

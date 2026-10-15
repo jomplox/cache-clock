@@ -471,6 +471,23 @@ test('a message that should have read the cache but did not is flagged', async (
   expect(await hit.find({ text: /missed the cache/ })).toBeUndefined()
 })
 
+test('a message sent as the chat compacts, before the mod has seen the compaction, is no miss', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  await $.classic.SessionStart({ session_id: 'self', transcript_path: '/p/self.jsonl', cwd: '/work', hook_event_name: 'SessionStart', source: 'startup' } as any)
+  world.stepUsage.push(usage(0, 250_000), usage(54_000, 25_000))
+  await send($)
+
+  // The chat compacted and a queued message went out at once: the boundary
+  // row is in the transcript, the compaction not yet in the mod's record.
+  await clock.advance(60_000)
+  world.tail = JSON.stringify({ timestamp: new Date(1_050_000).toISOString(), isSidechain: false, type: 'system', subtype: 'compact_boundary' })
+  await send($)
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: /missed the cache/i })).toBeUndefined()
+  expect(await band.find({ text: /79k cached/ })).toBeDefined()
+})
+
 test('a miss names what changed ahead of the conversation since the request before', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
@@ -506,6 +523,9 @@ test("other chats' caches show in the band, this chat's is published", async ($,
   const world = engine(on)
   world.store.set('chat:erp', { label: 'ERP', at: 10_000_000 - 20 * 60_000, ttlMin: 60 })
   world.store.set('chat:kiosk', { label: 'Kiosk', at: 10_000_000 - 57 * 60_000, ttlMin: 60 })
+  // Side chats carry their parent's title: listed once, the latest cache.
+  world.store.set('chat:erp-side', { label: 'ERP', at: 10_000_000 - 50 * 60_000, ttlMin: 60 })
+  world.store.set('chat:self-side', { label: 'innomed-erp', at: 10_000_000 - 5 * 60_000, ttlMin: 60 })
   world.store.set('chat:old', { label: 'Old', at: 10_000_000 - 3 * 3_600_000, ttlMin: 60 })
   world.store.set('chat:stale', { label: 'Stale', at: 10_000_000 - 2 * 86_400_000, ttlMin: 60 })
   await start($)
@@ -524,6 +544,13 @@ test("other chats' caches show in the band, this chat's is published", async ($,
     expect(await band.find({ text: /39:5\d/ })).toBeDefined()
     expect(await band.find({ text: /Old/ })).toBeUndefined()
   }
+
+  // Stats off, the list has the row to itself: one row, its top line shown,
+  // where the desktop otherwise centres the wrapped list over the line above.
+  await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).press({ key: 'stats-toggle' })
+  const off = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await off.find({ text: /^Kiosk$/ })).toBeDefined()
+  expect((await off.find({ key: 'detail' }))?.props).toMatchObject({ height: 1, overflow: 'hidden', alignItems: 'flex-start' })
 })
 
 test("the other chats' hover opens with the week across chats: what warm returns saved, what every chat spent", async ($, on) => {
@@ -685,6 +712,19 @@ test("a new chat, whose transcript did not exist yet when it started, shows its 
   await send($)
   await $.classic.Stop({ transcript_path: '/p/self.jsonl' } as any)
   await clock.advance(1_000)
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'terminal', ...BAND(false) })
+  expect(await band.find({ text: /^ 49% · no rebuilds$/ })).toBeDefined()
+})
+
+test("a chat another started, on an empty transcript, shows its stats within a minute of its long first turn", async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000_000 })
+  const world = engine(on)
+  world.transcript = '/p/self.jsonl'
+  await start($)
+  world.stepUsage.push(usage(0, 50_000))
+  await send($)
+  world.stats = [[1_000, 10, 0, 50_000], [1_060, 'U'], [1_070, 10, 50_000, 1_000]].map(r => r.join('\t')).join('\n')
+  await clock.advance(70_000)
   const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'terminal', ...BAND(false) })
   expect(await band.find({ text: /^ 49% · no rebuilds$/ })).toBeDefined()
 })

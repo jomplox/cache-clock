@@ -2,6 +2,22 @@
 
 Each version is tagged `v<version>`; releases from 0.23.1 on are on the [Releases page](https://github.com/jomplox/cache-clock/releases).
 
+## 0.23.5 (2026-10-15)
+
+- A message sent as the chat compacts (one queued from another chat, say) is no longer flagged as a cache miss: it went out before the compaction reached the mod, so the old cache looked skipped. The mod now checks the transcript for a compaction before calling a miss.
+
+## 0.23.4 (2026-10-14)
+
+- With Stats off, the other chats' row stays one row: in Desktop the list wrapped and sat over the chat's line above it; it now shows its first line, clipped.
+
+## 0.23.3 (2026-10-14)
+
+- Stats show up in a chat another chat started: it opens on an empty transcript and its first turn can run long, so until a chat has stats the mod reads them again every minute instead of waiting for the turn to end.
+
+## 0.23.2 (2026-10-14)
+
+- Other chats: a side chat no longer shows as a second copy of its parent. Its transcript carries the parent's title, so each title is listed once, with its latest cache, and never under this chat's own title.
+
 ## 0.23.1 (2026-10-14)
 
 - The band reads the Sound setting from memory, refreshed every 2 seconds, instead of from the store on every frame. A press in another chat shows within those 2 seconds.
