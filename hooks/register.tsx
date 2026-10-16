@@ -53,7 +53,7 @@ function settings(options: PluginOptions): Settings {
   return {
     keepWarm: options.keepWarm !== false,
     keepWarmMax: typeof options.keepWarmMax === 'number' ? Math.max(0, options.keepWarmMax) : 3,
-    compact: options.autoCompact === true,
+    compact: options.autoCompact !== false,
     alert: typeof options.alert === 'string' ? options.alert : 'toast+sound',
     otherChats: options.otherChats !== false,
     stats: options.stats !== false,
@@ -64,6 +64,8 @@ function settings(options: PluginOptions): Settings {
 // What the session's hooks share outside $.state: reset on each module load.
 type Flags = {
   isRunning: boolean
+  /** From a main turn's prompt to its end: the engine's own threshold compaction runs inside one. */
+  isInTurn: boolean
   isForking: boolean
   sessionId: string
   transcript: string
@@ -96,7 +98,11 @@ type Flags = {
   /** The Sound button's setting as the store last had it; null until read. */
   hasSound: boolean | null
   /** Every chat's week, as their sessions published it; null until read. */
-  week: { saved: number; spent: number } | null
+  week: { saved: number; spent: number; kw: KwDay } | null
+  /** This chat's keep-warm ledger, by day, as the store has it. */
+  ledger: Record<string, KwDay>
+  /** The ledger holds what the log knew from before it was kept. */
+  isBackfilled: boolean
   /** What the last main request sent ahead of the conversation; null until one ran. */
   prompt: PromptPrint | null
 }
@@ -115,10 +121,14 @@ type ChatStats = {
   rewritten: number
   /** Every pause, shortest first. */
   pauses: number[]
+  /** The pauses whose return found the cache gone, shortest first. */
+  coldPauses: number[]
   /** The last requests, oldest first: prompt size, share read from cache. */
   requests: { at: number; total: number; read: number; isRebuild: boolean }[]
-  /** The last pauses, oldest first. */
-  gaps: { at: number; ms: number }[]
+  /** The last pauses, oldest first, and whether the return found the cache gone. */
+  gaps: { at: number; ms: number; isCold: boolean; read: number }[]
+  /** Every stretch of over 3 minutes without a request, the last open-ended: where keep-warm could have refreshed. */
+  idles: { from: number; to: number }[]
 }
 
 // Requests and pauses the charts draw, the most recent.
@@ -141,50 +151,41 @@ jq -Rr 'def ts: .timestamp | sub("\\\\.[0-9]+Z$"; "Z") | fromdateiso8601;
   else empty end' |
 awk -F'\t' '$1 == "" || !seen[$1]++ { print $2 "\t" $3 "\t" $4 "\t" $5 }'`
 
-// What this chat and its subagents spent since a time ($1, the week) and since
-// local midnight: tokens per model, main and subagent apart, in the week and
-// today ("model, isSidechain, isWeek, isToday, input, read, 5m write, 1h
-// write, output"). Only transcripts written since the earlier of the two are
-// read; a response's rows repeat its usage, the last with the full output.
+// What this chat and its subagents spent since a time ($1, the week): tokens
+// per model ("model, input, read, 5m write, 1h write, output"). Only
+// transcripts written since then are read; a response's rows repeat its
+// usage, the last with the full output.
 const SPEND_SCRIPT = `PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin
-day=$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%Y-%m-%d) 00:00:00" +%s) || exit 1
-from=$1; [ "$day" -lt "$from" ] && from=$day
 ref=$(mktemp) || exit 1; trap 'rm -f "$ref"' EXIT
-touch -t "$(date -r "$from" +%Y%m%d%H%M.%S)" "$ref"
+touch -t "$(date -r "$1" +%Y%m%d%H%M.%S)" "$ref"
 find "$2" "\${2%.jsonl}/subagents" -name '*.jsonl' -newer "$ref" 2>/dev/null | tr '\\n' '\\0' |
 xargs -0 grep -h '"cache_read_input_tokens"' 2>/dev/null |
-jq -Rr --argjson since "$1" --argjson day "$day" --argjson from "$from" 'fromjson? | select(.type == "assistant" and .message.usage and .message.model != "<synthetic>")
-  | (.timestamp | sub("\\\\.[0-9]+Z$"; "Z") | fromdateiso8601) as $t | select($t >= $from)
+jq -Rr --argjson since "$1" 'fromjson? | select(.type == "assistant" and .message.usage and .message.model != "<synthetic>")
+  | (.timestamp | sub("\\\\.[0-9]+Z$"; "Z") | fromdateiso8601) as $t | select($t >= $since)
   | .message.usage as $u | ($u.cache_creation.ephemeral_1h_input_tokens // 0) as $h
-  | [(.message.id // .requestId // ""), .message.model, (.isSidechain // false), ($t >= $since), ($t >= $day), ($u.input_tokens // 0), ($u.cache_read_input_tokens // 0),
+  | [(.message.id // .requestId // ""), .message.model, ($u.input_tokens // 0), ($u.cache_read_input_tokens // 0),
      ($u.cache_creation.ephemeral_5m_input_tokens // (($u.cache_creation_input_tokens // 0) - $h)), $h, ($u.output_tokens // 0)] | @tsv' |
-awk -F'\\t' '{ if (!($1 in out) || $10 > out[$1]) { out[$1] = $10; row[$1] = $2 "\\t" $3 "\\t" $4 "\\t" $5 "\\t" $6 "\\t" $7 "\\t" $8 "\\t" $9 } }
-  END { for (id in row) { split(row[id], f, "\\t"); k = f[1] "\\t" f[2] "\\t" f[3] "\\t" f[4]; i[k] += f[5]; r[k] += f[6]; w5[k] += f[7]; w1[k] += f[8]; o[k] += out[id] }
+awk -F'\\t' '{ if (!($1 in out) || $7 > out[$1]) { out[$1] = $7; row[$1] = $2 "\\t" $3 "\\t" $4 "\\t" $5 "\\t" $6 } }
+  END { for (id in row) { split(row[id], f, "\\t"); k = f[1]; i[k] += f[2]; r[k] += f[3]; w5[k] += f[4]; w1[k] += f[5]; o[k] += out[id] }
         for (k in i) print k "\\t" i[k] "\\t" r[k] "\\t" w5[k] "\\t" w1[k] "\\t" o[k] }'`
 
 type ChatSpend = {
   /** Since when: the weekly rate-limit window's start, else 7 days back. */
   since: number
   isWindow: boolean
-  /** At list prices, in dollars: the week, its subagents' share, and today. */
+  /** The week at list prices, in dollars. */
   total: number
-  subagents: number
-  today: number
 }
 
 // Output is priced at 5× base input, as on every current model.
 function parseSpend(stdout: string, since: number, isWindow: boolean): ChatSpend {
-  const spend: ChatSpend = { since, isWindow, total: 0, subagents: 0, today: 0 }
+  const spend: ChatSpend = { since, isWindow, total: 0 }
   for (const line of stdout.split('\n')) {
-    const [model, isSub, isWeek, isToday, ...counts] = line.split('\t')
+    const [model, ...counts] = line.split('\t')
     const [input, hit, w5, w1, output] = counts.map(Number)
     const p = price(model)
     if (p.base === null) continue
-    const usd = (p.base * ((input || 0) + (hit || 0) * p.read + (w5 || 0) * 1.25 + (w1 || 0) * 2 + (output || 0) * 5)) / 1e6
-    if (isToday === 'true') spend.today += usd
-    if (isWeek !== 'true') continue
-    spend.total += usd
-    if (isSub === 'true') spend.subagents += usd
+    spend.total += (p.base * ((input || 0) + (hit || 0) * p.read + (w5 || 0) * 1.25 + (w1 || 0) * 2 + (output || 0) * 5)) / 1e6
   }
   return spend
 }
@@ -199,6 +200,7 @@ async function refreshSpend($: EngineInterface, flags: Flags, now: number): Prom
   const out = await $.process.run(['/bin/sh', '-c', SPEND_SCRIPT, 'sh', String(Math.floor(since / 1000)), flags.transcript]).catch(() => null)
   if (!out || out.exitCode !== 0 || out.isStdoutTruncated) return
   flags.spend = parseSpend(out.stdout, since, isWindow)
+  if (flags.sessionId) flags.ledger = (await readLedger($, flags.sessionId))?.days ?? {}
   // Published for every chat's week total, kept past this chat's own entry.
   if (flags.sessionId) await $.store.set(SPEND_KEY + flags.sessionId, { since, total: flags.spend.total, at: now })
 }
@@ -219,6 +221,95 @@ async function addSavedToday($: EngineInterface, at: number, saved: number): Pro
   await $.store.set(SAVED_DAYS_KEY, next).catch(() => {})
 }
 
+// What keep-warm's refreshes cost each day, and what they saved: a return
+// that read a cache the refreshes held past its own expiry saved writing it
+// again; one that found it cold or compacted anyway (lost) saved nothing.
+const KW_KEY = 'keep-warm:'
+type KwDay = { paid: number; saved: number; refreshes: number; held: number; lost: number }
+const KW_FIELDS = ['paid', 'saved', 'refreshes', 'held', 'lost'] as const
+const kwZero = (): KwDay => ({ paid: 0, saved: 0, refreshes: 0, held: 0, lost: 0 })
+
+function kwSince(days: Record<string, unknown> | undefined, since: number, into = kwZero()): KwDay {
+  const first = dayKey(since)
+  for (const [d, v] of Object.entries(days ?? {})) {
+    if (d < first || typeof v !== 'object' || v === null) continue
+    for (const k of KW_FIELDS) {
+      const n = (v as Record<string, unknown>)[k]
+      if (typeof n === 'number') into[k] += n
+    }
+  }
+  return into
+}
+
+// `from`: when the ledger began counting as things happen; what came before
+// is filled in once from the log.
+type Ledger = { at: number; from: number; days: Record<string, KwDay>; isBackfilled?: boolean }
+
+async function readLedger($: EngineInterface, sessionId: string): Promise<Ledger | undefined> {
+  const v = (await $.store.get(KW_KEY + sessionId).catch(() => undefined)) as Partial<Ledger> | undefined
+  if (!v || typeof v.days !== 'object' || v.days === null) return undefined
+  return { at: v.at ?? 0, from: v.from ?? 0, days: v.days, isBackfilled: v.isBackfilled }
+}
+
+async function addKw($: EngineInterface, flags: Flags, at: number, add: Partial<KwDay>, edit: Partial<Ledger> = {}): Promise<void> {
+  if (!flags.sessionId) return
+  const prev = await readLedger($, flags.sessionId)
+  const keep = dayKey(at - WEEK - DAY)
+  const days = Object.fromEntries(Object.entries(prev?.days ?? {}).filter(([d]) => d > keep))
+  const day = { ...kwZero(), ...days[dayKey(at)] }
+  for (const k of KW_FIELDS) day[k] += add[k] ?? 0
+  days[dayKey(at)] = day
+  flags.ledger = days
+  await $.store.set(KW_KEY + flags.sessionId, { at, from: prev?.from ?? at, ...(prev?.isBackfilled ? { isBackfilled: true } : {}), ...edit, days }).catch(() => {})
+}
+
+// Keep-warm's refreshes of this chat from before its ledger, from the log
+// (which names the chat by its title), and what became of the pauses they
+// fell in, from the transcript: a return past the TTL that read the cache
+// was held, one that rebuilt it was lost. A refresh counts only where this
+// chat sat idle: chats can share a title. Done once per chat.
+const LOG_REFRESHES = 'grep -F -- " $1 · refresh read " "$HOME/.claude/cache-clock.log" 2>/dev/null; true'
+async function backfillLedger($: EngineInterface, flags: Flags, info: CacheInfo | null, now: number): Promise<void> {
+  if (flags.isBackfilled || !flags.sessionId || !flags.label || flags.stats === null) return
+  const prev = await readLedger($, flags.sessionId)
+  flags.isBackfilled = true
+  if (prev?.isBackfilled) return
+  const until = prev?.from || now
+  const { base, read: readMult } = price(info?.model)
+  const ttlMin = info?.ttlMin ?? DEFAULT_TTL
+  const out = await $.process.run(['/bin/sh', '-c', LOG_REFRESHES, 'sh', flags.label]).catch(() => null)
+  const sent: { at: number; paid: number }[] = []
+  for (const line of (out?.stdout ?? '').split('\n')) {
+    const m = line.match(/^(\S+) .* \(read (\d+), write (\d+), input (\d+)\)$/)
+    const at = m ? Date.parse(m[1]!) : NaN
+    if (!m || !(at < until) || base === null || !flags.stats.idles.some(i => at > i.from && at < i.to)) continue
+    sent.push({ at, paid: (base * (Number(m[4]) + Number(m[2]) * readMult + Number(m[3]) * writeMult(ttlMin))) / 1e6 })
+  }
+  const days: Record<string, KwDay> = { ...prev?.days }
+  const add = (at: number, d: Partial<KwDay>) => {
+    const day = { ...kwZero(), ...days[dayKey(at)] }
+    for (const k of KW_FIELDS) day[k] += d[k] ?? 0
+    days[dayKey(at)] = day
+  }
+  for (const r of sent) add(r.at, { paid: r.paid, refreshes: 1 })
+  for (const g of flags.stats.gaps) {
+    if (g.at >= until || !sent.some(r => r.at > g.at - g.ms && r.at < g.at)) continue
+    if (g.isCold) add(g.at, { lost: 1 })
+    else if (g.ms > ttlMin * 60_000 && base !== null) add(g.at, { held: 1, saved: (g.read * base * (writeMult(ttlMin) - readMult)) / 1e6 })
+  }
+  flags.ledger = days
+  await $.store.set(KW_KEY + flags.sessionId, { at: prev?.at || now, from: until, isBackfilled: true, days }).catch(() => {})
+}
+
+// "≈$0.62 for 9 refreshes, saved ≈$4.10 on 2 returns: paid back 6.6×".
+function kwVerdict(w: KwDay): string {
+  const cost = `≈${usd(w.paid)} for ${w.refreshes} ${w.refreshes === 1 ? 'refresh' : 'refreshes'}`
+  const back = w.held === 0 ? 'no return saved yet' : `saved ≈${usd(w.saved)} on ${w.held} ${w.held === 1 ? 'return' : 'returns'}`
+  const verdict = w.held === 0 ? '' : w.saved >= w.paid ? `: paid back ${(w.saved / w.paid).toFixed(1)}×` : ': not paid back'
+  const lost = w.lost > 0 ? ` · ${w.lost} ${w.lost === 1 ? 'pause' : 'pauses'} went cold anyway` : ''
+  return `${cost}, ${back}${verdict}${lost}`
+}
+
 const usd = (n: number) => `$${n.toFixed(n >= 100 ? 0 : 2)}`
 
 // Stats are read again at most this often: a long transcript takes seconds.
@@ -228,7 +319,7 @@ const STATS_EVERY = 5 * 60_000
 const STATS_FIRST_EVERY = 60_000
 
 function parseStats(stdout: string): ChatStats | null {
-  const stats: ChatStats = { read: 0, total: 0, rebuilds: 0, rewritten: 0, pauses: [], requests: [], gaps: [] }
+  const stats: ChatStats = { read: 0, total: 0, rebuilds: 0, rewritten: 0, pauses: [], coldPauses: [], requests: [], gaps: [], idles: [] }
   let last: number | null = null
   let isPrompted = false
   for (const line of stdout.split('\n')) {
@@ -254,16 +345,20 @@ function parseStats(stdout: string): ChatStats | null {
     // first after it, start to start, as the cache's TTL counts it.
     if (isPrompted && last !== null) {
       stats.pauses.push(at - last)
-      stats.gaps.push({ at, ms: at - last })
+      if (isRebuild) stats.coldPauses.push(at - last)
+      stats.gaps.push({ at, ms: at - last, isCold: isRebuild, read: hit || 0 })
     }
+    if (last !== null && at - last > 3 * 60_000) stats.idles.push({ from: last, to: at })
     isPrompted = false
     stats.read += hit || 0
     stats.total += all
     last = at
   }
   stats.pauses.sort((a, b) => a - b)
+  stats.coldPauses.sort((a, b) => a - b)
   stats.requests = stats.requests.slice(-CHART_REQUESTS)
   stats.gaps = stats.gaps.slice(-CHART_GAPS)
+  if (last !== null) stats.idles.push({ from: last, to: Infinity })
   return stats.total > 0 ? stats : null
 }
 
@@ -319,9 +414,9 @@ function chart(stats: ChatStats, key: string, draw: () => string): string {
   return svg
 }
 const CHART_STYLE = `<style>
-  svg { color-scheme: light dark; --bar: #2a78d6; --bad: #ec835a; --guide: rgba(120,120,115,.45); --track: rgba(120,120,115,.14) }
+  svg { color-scheme: light dark; --bar: #2a78d6; --bad: #ec835a; --good: #0ca30c; --guide: rgba(120,120,115,.45); --track: rgba(120,120,115,.14) }
   @media (prefers-color-scheme: dark) { svg { --bar: #3987e5; --guide: rgba(195,194,183,.35); --track: rgba(195,194,183,.06) } }
-  .b { fill: var(--bar); opacity: .8 } .b.x { fill: var(--bad); opacity: .95 }
+  .b { fill: var(--bar); opacity: .8 } .b.x { fill: var(--bad); opacity: .95 } .b.g { fill: var(--good); opacity: .9 }
   .t { fill: var(--track) }
   .r { stroke: var(--guide); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke }
   .a { fill: var(--bar); opacity: .18 } .l { fill: none; stroke: var(--bar); stroke-width: 1.5; vector-effect: non-scaling-stroke }
@@ -332,7 +427,7 @@ const svgDoc = (w: number, body: string) =>
 
 // Bars, right-aligned in at least `slots` places so a few stay thin; each a
 // faint track and the bar from the baseline.
-function barChart(values: { h: number; isBad: boolean }[], slots: number, guide?: number): string {
+function barChart(values: { h: number; isBad: boolean; isGood?: boolean }[], slots: number, guide?: number): string {
   const n = Math.max(values.length, slots)
   const w = n * 10
   const offset = n - values.length
@@ -340,7 +435,7 @@ function barChart(values: { h: number; isBad: boolean }[], slots: number, guide?
     .map((v, i) => {
       const x = (offset + i) * 10 + 1.5
       const h = Math.max(1.5, Math.min(1, v.h) * (CHART_H - 2))
-      return `<rect class="t" x="${x}" y="0" width="7" height="${CHART_H}"/><rect class="b${v.isBad ? ' x' : ''}" x="${x}" y="${CHART_H - h}" width="7" height="${h}"/>`
+      return `<rect class="t" x="${x}" y="0" width="7" height="${CHART_H}"/><rect class="b${v.isBad ? ' x' : v.isGood ? ' g' : ''}" x="${x}" y="${CHART_H - h}" width="7" height="${h}"/>`
     })
     .join('')
   const line = guide === undefined ? '' : `<line class="r" x1="0" x2="${w}" y1="${CHART_H - guide * (CHART_H - 2)}" y2="${CHART_H - guide * (CHART_H - 2)}"/>`
@@ -350,19 +445,75 @@ function barChart(values: { h: number; isBad: boolean }[], slots: number, guide?
 function readsChart(stats: ChatStats): string {
   return barChart(
     stats.requests.map(r => ({ h: r.total ? r.read / r.total : 0, isBad: r.isRebuild })),
-    40,
+    REQUEST_SLOTS,
   )
 }
 
 // Pauses on a square-root scale up to twice the TTL, so a 3m pause still
-// shows beside a 2h one; the TTL is the dashed line.
+// shows beside a 2h one; the TTL is the dashed line. One past it is green
+// when its return still read the cache (keep-warm held it), else orange.
 function pausesChart(stats: ChatStats, ttlMin: number): string {
   const ttl = ttlMin * 60_000
   return barChart(
-    stats.gaps.map(g => ({ h: Math.sqrt(g.ms / (2 * ttl)), isBad: g.ms > ttl })),
-    24,
+    stats.gaps.map(g => ({ h: Math.sqrt(g.ms / (2 * ttl)), isBad: g.ms > ttl && g.isCold, isGood: g.ms > ttl && !g.isCold })),
+    PAUSE_SLOTS,
     Math.SQRT1_2,
   )
+}
+
+// The charts' slots: the bars sit right-aligned in at least this many.
+const PAUSE_SLOTS = 24
+const REQUEST_SLOTS = 40
+
+// Hovering a chart: a row of ticks under it, each over the bars it spans and
+// at least a cell wide, so where bars are narrower than a cell a tick takes
+// a few, the most recent singly. Groups from the right end, oldest first.
+function tickGroups<T>(items: T[], slots: number, cols: number): T[][] {
+  const per = Math.max(1, Math.ceil(slots / Math.max(1, cols)))
+  const groups: T[][] = []
+  for (let end = items.length; end > 0; end -= per) groups.unshift(items.slice(Math.max(0, end - per), end))
+  return groups
+}
+
+const clockTime = (at: number) => {
+  const d = new Date(at)
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+// A time of day, with the date in front when it was not today.
+function when(at: number, now: number): string {
+  const d = new Date(at)
+  return `${dayKey(at) === dayKey(now) ? '' : `${MONTHS[d.getMonth()]} ${d.getDate()} `}${clockTime(at)}`
+}
+
+type Card = { at: string; text: string; end?: string; isBad?: boolean }
+
+// A pause's card: when it began, how long, and what the return found.
+function pauseCard(g: ChatStats['gaps'][number], ttlMin: number, now: number): Card {
+  const end = g.isCold ? 'cache went cold' : g.ms > ttlMin * 60_000 ? 'keep-warm held the cache' : 'cache still warm'
+  return { at: when(g.at - g.ms, now), text: `${duration(g.ms)} away`, end, isBad: g.isCold }
+}
+
+// A tick's requests on the reads chart: how much came from cache, and whether
+// one had to write the cache again.
+function readsCard(reqs: ChatStats['requests'], now: number): Card {
+  const read = reqs.reduce((n, r) => n + r.read, 0)
+  const total = reqs.reduce((n, r) => n + r.total, 0)
+  const rebuilds = reqs.filter(r => r.isRebuild).length
+  const pct = total ? Math.round((read / total) * 100) : 0
+  return {
+    at: when(reqs[0]!.at, now),
+    text: `${reqs.length > 1 ? `${reqs.length} requests · ` : ''}${pct}% read from cache`,
+    end: rebuilds ? (reqs.length > 1 ? `${rebuilds} cache ${rebuilds === 1 ? 'rebuild' : 'rebuilds'}` : 'cache rebuilt') : undefined,
+    isBad: rebuilds > 0,
+  }
+}
+
+// A tick's requests on the size chart: the prompt each sent.
+function sizeCard(reqs: ChatStats['requests'], now: number): Card {
+  const first = reqs[0]!.total
+  const last = reqs[reqs.length - 1]!.total
+  return { at: when(reqs[0]!.at, now), text: `${reqs.length > 1 && kTokens(first) !== kTokens(last) ? `${kTokens(first)} → ` : ''}${kTokens(last)} prompt` }
 }
 
 // The prompt's size per request, as an area: it grows with the conversation
@@ -370,7 +521,7 @@ function pausesChart(stats: ChatStats, ttlMin: number): string {
 function sizeChart(stats: ChatStats): string {
   const reqs = stats.requests
   const max = Math.max(...reqs.map(r => r.total), 1)
-  const n = Math.max(reqs.length, 40)
+  const n = Math.max(reqs.length, REQUEST_SLOTS)
   const w = n * 10
   const offset = n - reqs.length
   const pt = (r: (typeof reqs)[number], i: number) => `${(offset + i) * 10 + 5},${(CHART_H - 1 - (r.total / max) * (CHART_H - 3)).toFixed(1)}`
@@ -511,9 +662,10 @@ function readsCaption(stats: ChatStats): string {
 }
 
 // The band's second row, most useful first: what losing the cache would
-// cost, what keep-warm paid to keep it, how the cache has done in this chat,
-// and how the person's pauses compare with its TTL.
-function statLines(info: CacheInfo | null, current: string | null, kw: KeepWarm, stats: ChatStats | null, spend: ChatSpend | null, now: number) {
+// cost, what keep-warm paid to keep it this pause, how the cache has done in
+// this chat, how the person's pauses compare with its TTL, and whether
+// keep-warm has paid for itself this week.
+function statLines(info: CacheInfo | null, current: string | null, kw: KeepWarm, stats: ChatStats | null, spend: ChatSpend | null, ledger: Record<string, KwDay>, now: number) {
   const lines: { key: string; label: string; value: string }[] = []
   const ttlMin = info?.ttlMin ?? DEFAULT_TTL
   const p = price(info?.model ?? current)
@@ -530,7 +682,7 @@ function statLines(info: CacheInfo | null, current: string | null, kw: KeepWarm,
       const kept = (info.tokens * p.base * writeMult(ttlMin)) / 1e6
       lines.push({
         key: 'payoff',
-        label: 'Keep-warm',
+        label: 'This pause',
         value: ` ${kw.refreshes} ${kw.refreshes === 1 ? 'refresh' : 'refreshes'} ≈ $${paid.toFixed(2)} kept a $${kept.toFixed(2)} rewrite away`,
       })
     }
@@ -544,21 +696,18 @@ function statLines(info: CacheInfo | null, current: string | null, kw: KeepWarm,
     if (stats.pauses.length >= 3) {
       const median = stats.pauses[Math.floor(stats.pauses.length / 2)] ?? 0
       const over = stats.pauses.filter(ms => ms > ttlMin * 60_000).length
+      const kept = over - stats.coldPauses.filter(ms => ms > ttlMin * 60_000).length
+      const warm = kept > 0 ? ` (${kept === over ? 'all' : kept} kept warm)` : ''
       lines.push({
         key: 'pace',
         label: 'Your pauses',
-        value: ` typically ${duration(median)} · ${over} over ${ttlMin === 60 ? '1h' : '5m'}`,
+        value: ` typically ${duration(median)} · ${over} over ${ttlMin === 60 ? '1h' : '5m'}${warm}`,
       })
     }
   }
-  if (spend && (spend.total >= 0.01 || spend.today >= 0.01)) {
-    const subs = spend.subagents >= 0.01 ? ` (${usd(spend.subagents)} subagents)` : ''
-    lines.push({
-      key: 'spend',
-      label: 'Spent',
-      value: ` ≈${usd(spend.today)} today · ≈${usd(spend.total)} ${spend.isWindow ? 'this week' : 'in 7 days'}${subs}, at list price`,
-    })
-  }
+  const week = kwSince(ledger, spend?.since ?? now - WEEK)
+  const span = spend?.isWindow ? 'this week' : 'in 7 days'
+  lines.push({ key: 'keepwarm', label: 'Keep-warm', value: week.refreshes > 0 ? ` ${span} ${kwVerdict(week)}` : ` no refreshes ${span}, nothing spent` })
   return lines
 }
 
@@ -867,10 +1016,18 @@ async function refresh($: EngineInterface, flags: Flags, sentAt: number): Promis
   if (flags.isRunning || flags.isForking) return 'refresh not sent (a turn or a refresh is running)'
   flags.isForking = true
   try {
+    const before = await read($, cache)
     const r = await $.model.fork({ prompt: PING })
     const usage = 'usage' in r ? r.usage : undefined
     const hit = usage?.cache_read_input_tokens ?? 0
     const total = hit + (usage?.cache_creation_input_tokens ?? 0) + (usage?.input_tokens ?? 0)
+    // Whatever it read or wrote, an answered refresh was paid for.
+    const { base, read: readMult } = price(before?.model)
+    if (usage && base !== null) {
+      const ttlMin = before?.ttlMin ?? DEFAULT_TTL
+      const units = (usage.input_tokens ?? 0) + hit * readMult + (usage.cache_creation_input_tokens ?? 0) * writeMult(ttlMin) + (usage.output_tokens ?? 0) * 5
+      await addKw($, flags, sentAt, { paid: (base * units) / 1e6, refreshes: 1 })
+    }
     const pause = (stopped: string) => update($, keepWarm, prev => ({ ...prev, stopped }))
     let outcome: string
     if (!r.isAnswered && r.reason !== 'empty-reply') {
@@ -886,7 +1043,8 @@ async function refresh($: EngineInterface, flags: Flags, sentAt: number): Promis
       outcome = `refresh read ${kTokens(hit)} of ${kTokens(total)} tokens from cache`
       // A message sent while the refresh ran set a later time already.
       await update($, cache, prev => prev && { ...prev, at: Math.max(prev.at, sentAt) })
-      await update($, keepWarm, prev => ({ ...prev, refreshes: prev.refreshes + 1, lastRead: hit }))
+      const coldAt = before ? before.at + before.ttlMin * 60_000 : undefined
+      await update($, keepWarm, prev => ({ ...prev, refreshes: prev.refreshes + 1, lastRead: hit, coldAt: prev.coldAt ?? coldAt }))
     }
     await logLine($, flags, sentAt, `${outcome} (read ${hit}, write ${usage?.cache_creation_input_tokens ?? 0}, input ${usage?.input_tokens ?? 0})`)
     return outcome
@@ -1094,6 +1252,23 @@ async function maybeAlert($: EngineInterface, s: Settings, flags: Flags): Promis
   if (s.alert === 'toast+sound') await playSound($, 'sounds/expiring.wav')
 }
 
+// Why Claude Code's idle compaction should not run now, or null to let it:
+// keep-warm will refresh this cache (auto judged as at its refresh), or
+// compacting is off for this chat.
+async function idleVeto($: EngineInterface, s: Settings, flags: Flags, now: number): Promise<string | null> {
+  const kw = await read($, keepWarm)
+  const info = await read($, cache)
+  if ((kw.isOn ?? s.keepWarm) && !kw.stopped && info !== null) {
+    const work = await pendingWork($, flags, now)
+    const isRefreshing =
+      !isSpent(kw, refreshLimit(s, info.ttlMin, info.model, work.count > 0)) &&
+      !(kw.isAuto && work.count === 0 && !isRefreshWorthIt(flags.stats, info.ttlMin * 60_000 - refreshLead(info.ttlMin) - ((flags.askedAt || info.at) - info.at), info.ttlMin, info.model))
+    if (isRefreshing) return 'keep-warm is holding this chat\'s cache'
+  }
+  if (!(kw.isCompactOn ?? s.compact)) return 'compacting is off for this chat'
+  return null
+}
+
 // With keep-warm off, whether the chat will be compacted before it goes cold.
 const willCompact = (s: Settings, kw: KeepWarm, info: CacheInfo) => !(kw.isOn ?? s.keepWarm) && (kw.isCompactOn ?? s.compact) && !kw.stopped && (info.tokens ?? 0) >= COMPACT_MIN
 
@@ -1120,7 +1295,14 @@ async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise
   const list: OtherChat[] = []
   const since = flags.spend?.since
   let spent = 0
+  const kw = kwZero()
   for (const key of await $.store.keys()) {
+    if (key.startsWith(KW_KEY)) {
+      const v = (await $.store.get(key)) as { at?: number; days?: Record<string, unknown> } | undefined
+      if (typeof v?.at !== 'number' || now - v.at > WEEK + DAY) await $.store.delete(key)
+      else if (since !== undefined) kwSince(v.days, since, kw)
+      continue
+    }
     if (key.startsWith(SPEND_KEY)) {
       const v = (await $.store.get(key)) as { since?: number; total?: number; at?: number } | undefined
       if (typeof v?.at !== 'number' || now - v.at > WEEK + DAY) await $.store.delete(key)
@@ -1147,7 +1329,7 @@ async function syncChats($: EngineInterface, s: Settings, flags: Flags): Promise
     const days = ((await $.store.get(SAVED_DAYS_KEY).catch(() => undefined)) ?? {}) as Record<string, number>
     const first = dayKey(since)
     const saved = Object.entries(days).reduce((sum, [d, v]) => (d >= first && typeof v === 'number' ? sum + v : sum), 0)
-    flags.week = { saved, spent }
+    flags.week = { saved, spent, kw }
   }
   // Unchanged, no write: a write redraws the band, restarting an animation.
   const prev = await read($, others)
@@ -1238,7 +1420,7 @@ function otherChatsShown(
 
 export const register: Register = (on, options) => {
   const s = settings(options)
-  const flags: Flags = { isRunning: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, askedAt: 0, hasSound: null, week: null, prompt: null }
+  const flags: Flags = { isRunning: false, isInTurn: false, isForking: false, sessionId: '', transcript: '', label: '', published: '', ticks: 0, listed: null, stats: null, spend: null, statsAt: 0, failures: 0, runOf: new Map(), demoUntil: 0, demoKind: 'mint', demoIndex: 0, isTyped: false, jingle: null, chime: null, askedAt: 0, hasSound: null, week: null, ledger: {}, isBackfilled: false, prompt: null }
 
   // Also runs on a mod (re)load inside an open chat: seed from its transcript so
   // the band shows before the next message.
@@ -1281,6 +1463,12 @@ export const register: Register = (on, options) => {
       maybeAlert($, s, flags).catch(() => {})
       syncChats($, s, flags).catch(() => {})
       if (flags.stats === null) refreshStats($, flags).catch(() => {})
+      // Once the chat's title is known: the log names chats by it.
+      if (!flags.isBackfilled && flags.stats !== null && flags.label) {
+        Promise.all([read($, cache), $.clock.now()])
+          .then(([info, now]) => backfillLedger($, flags, info, now))
+          .catch(() => {})
+      }
     })
     await syncChats($, s, flags).catch(() => {})
     return next(e)
@@ -1306,9 +1494,11 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     const o = e.origin as PromptOrigin | undefined
     const isOwn = o === undefined || o.kind === 'composer' || o.kind === 'bridge' || o.kind === 'sdk' || (o.kind === 'plugin' && o.asUser === true)
-    if (e.turnId === undefined) flags.isTyped = isOwn
+    // A new turn starts here; its turn.start may reach us only after the
+    // engine compacts the chat at the context threshold.
+    if (e.turnId === undefined) [flags.isTyped, flags.isInTurn] = [isOwn, true]
     const r = await next(e)
-    if ('drop' in r && r.drop !== undefined) flags.isTyped = false
+    if ('drop' in r && r.drop !== undefined) [flags.isTyped, flags.isInTurn] = [false, false]
     return r
   }).catch(($, e, next) => next(e))
 
@@ -1438,6 +1628,10 @@ export const register: Register = (on, options) => {
     const expected = e.index === 0 && prev !== null && liveLeft(prev, bare(e.model), at) !== null ? prev.tokens : undefined
     await update($, cache, p => ({ at, ttlMin: p?.ttlMin ?? DEFAULT_TTL, model: bare(e.model), tokens: p?.tokens }))
     await update($, model, () => bare(e.model))
+    // A return after refreshes: kept past the cache's own expiry, it saved a
+    // rewrite if the response read the cache; settled once it is answered.
+    const held = e.index === 0 ? await read($, keepWarm) : null
+    const isHeldReturn = held !== null && held.refreshes > 0 && held.coldAt !== undefined && at > held.coldAt
     if (e.index === 0) await update($, keepWarm, kw => ({ isOn: kw.isOn, isAuto: kw.isAuto, isCompactOn: kw.isCompactOn, refreshes: 0 }))
     // Where the person's pause starts, if this is the turn's last request.
     flags.askedAt = at
@@ -1479,6 +1673,12 @@ export const register: Register = (on, options) => {
         const cause = isMiss && before && print ? missCause(before, print) : undefined
         await update($, miss, () => (isMiss && expected !== undefined ? { at, read: hit, total: expected, cause } : null))
       }
+      if (isHeldReturn && prev !== null) {
+        const { base, read: readMult } = price(prev.model)
+        if (expected !== undefined && !isMiss && !isCompaction) {
+          await addKw($, flags, at, { held: 1, saved: base === null ? 0 : (expected * base * (writeMult(prev.ttlMin) - readMult)) / 1e6 })
+        } else await addKw($, flags, at, { lost: 1 })
+      }
       // A new cache: the turn opened on a cold one (or missed it) and wrote
       // the prefix, or any request wrote most of its prompt.
       const write = usage.cache_creation_input_tokens ?? 0
@@ -1514,9 +1714,33 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  on('turn.complete', async ($, e, next) => {
-    if (!e.agentId) flags.isRunning = false
+  on('turn.start', async ($, e, next) => {
+    if (!(e as { agentId?: string }).agentId) flags.isInTurn = true
     return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) [flags.isRunning, flags.isInTurn] = [false, false]
+    return next(e)
+  })
+
+  // Claude Code's own idle compaction: a while before an hour's cache runs
+  // out (90% of the way, about 54 minutes), between turns, it compacts a long
+  // chat. It comes as an `auto` compaction outside a turn; the one at the
+  // context threshold runs inside one, the person's and ours are `manual` or
+  // `plugin`. Keep-warm and the Compact button decide: while keep-warm will
+  // still refresh this cache, or with compacting off, it is skipped.
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId || e.trigger !== 'auto' || flags.isInTurn || flags.isRunning) return next(e)
+    const now = await $.clock.now()
+    const why = await idleVeto($, s, flags, now)
+    if (why !== null) {
+      await logLine($, flags, now, `Claude Code's idle compaction skipped (${why})`)
+      return { skip: `cache-clock: ${why}` }
+    }
+    const result = await next(e)
+    if (result.skip === undefined) await logLine($, flags, now, `compacted while idle by Claude Code`)
+    return result
   })
 
   // After the turn: the TTL the writes actually used (5m once on usage credits)
@@ -1679,7 +1903,9 @@ export const register: Register = (on, options) => {
     const chatList =
       chats.length > 0 ? (
         <Text key="chat-list" wrap="truncate-end">
-          {week !== null ? <Text>{`This week, all chats: saved ${usd(week.saved)} · spent ${usd(week.spent)}   `}</Text> : null}
+          {week !== null ? (
+            <Text>{`This week, all chats: saved ${usd(week.saved)} · spent ${usd(week.spent)}${week.kw.paid >= 0.005 ? ` · keep-warm ${kwVerdict(week.kw)}` : ''}   `}</Text>
+          ) : null}
           {chats.slice(0, 5).map((c, i) => (
             <Text key={`chat-${c.id}`} dimColor>
               {i > 0 ? '   ' : ''}
@@ -1697,12 +1923,12 @@ export const register: Register = (on, options) => {
     const isRewarding = Svg !== null && e.surface !== 'terminal' && prize !== null && now - prize.at >= 0 && now - prize.at < REWARD_MS
     const mint = await read($, minted)
     const isMinting = !isRewarding && Svg !== null && e.surface !== 'terminal' && mint !== null && now - mint.at >= 0 && now - mint.at < MINT_MS
-    const allStats = isStatsOn ? statLines(info, current, kw, flags.stats, flags.spend, now) : []
+    const allStats = isStatsOn ? statLines(info, current, kw, flags.stats, flags.spend, flags.ledger, now) : []
     // Where the surface draws SVG, this chat's history goes to charts, each
     // captioned with its stat line; the text row keeps what has no chart.
     const charted = Svg !== null && flags.stats !== null && flags.stats.requests.length > 1
     const caption = (key: string) => allStats.find(l => l.key === key)
-    const stats = charted ? allStats.filter(l => l.key === 'cold' || l.key === 'payoff' || l.key === 'spend') : allStats
+    const stats = charted ? allStats.filter(l => l.key === 'cold' || l.key === 'payoff' || l.key === 'keepwarm') : allStats
     const statText =
       stats.length > 0 ? (
         <Text key="stats" wrap="truncate-end">
@@ -1751,29 +1977,78 @@ export const register: Register = (on, options) => {
           </Box>
         ) : null
       const isSwapped = chatList !== null && (statText !== null || (isStatsOn && charted))
-      const tile = (key: string, label: string, value: string, source: string, alt: string) => (
+      const tile = (key: string, label: string, value: string, chartEl: JSX.Element | null, cards: JSX.Element[] = []) => (
         <Box key={`tile-${key}`} flexDirection="column" width="32%" overflow="hidden">
-          <Box height={1} overflow="hidden" alignItems="flex-start">
-            <Box flexShrink={0}>
-              <Text>{label}</Text>
-            </Box>
-            <Box flexShrink={1} overflow="hidden">
-              <Text dimColor wrap="truncate-end">
-                {value}
-              </Text>
+          {/* A hovered card comes first in the clipped row, so the caption gives way. */}
+          <Box height={1} overflow="hidden" flexDirection="column">
+            {cards}
+            <Box flexShrink={0} height={1} alignItems="flex-start">
+              <Box flexShrink={0}>
+                <Text>{label}</Text>
+              </Box>
+              <Box flexShrink={1} overflow="hidden">
+                <Text dimColor wrap="truncate-end">
+                  {value}
+                </Text>
+              </Box>
             </Box>
           </Box>
-          {Svg ? <Svg key={`chart-${key}`} source={source} alt={alt} height={CHART_H} /> : null}
+          {chartEl}
         </Box>
       )
-      const tiles =
-        isStatsOn && charted && flags.stats !== null && Svg !== null ? (
+      const svgChart = (key: string, source: string, alt: string) => (Svg ? <Svg key={`chart-${key}`} source={source} alt={alt} height={CHART_H} /> : null)
+      // Hovering a chart: under it a row of ticks, each a Text in its group
+      // (the desktop heats a group from a Text, as the other-chats count does),
+      // which reveals that tick's card in the caption's row.
+      const tileCols = Math.floor((e.props.bodyColumns - 4) * 0.32) - 1
+      const hoverCard = (scope: string, c: Card) => (
+        <Box key={`card-${scope}`} flexShrink={0} display="none" hover={{ scope, display: 'flex' }}>
+          <Text wrap="truncate-end">
+            <Text bold>{c.at}</Text>
+            <Text dimColor>{` · ${c.text}`}</Text>
+            {c.end !== undefined ? <Text color={c.isBad ? 'warning' : 'success'}>{` · ${c.end}`}</Text> : null}
+          </Text>
+        </Box>
+      )
+      const ticked = <T extends { at: number }>(key: string, svg: JSX.Element | null, items: T[], slots: number, card: (group: T[]) => Card) => {
+        const groups = tickGroups(items, Math.max(items.length, slots), tileCols)
+        const scope = (g: T[]) => `${key}-${g[0]!.at}`
+        return {
+          chart: (
+            <Box key={`${key}-chart`} flexDirection="column">
+              {svg}
+              <Box key={`${key}-ticks`} height={1}>
+                {items.length < slots ? <Box key={`${key}-tick-none`} width={0} flexGrow={slots - items.length} /> : null}
+                {groups.map(g => (
+                  <Box key={`tick-${scope(g)}`} width={0} flexGrow={g.length} justifyContent="center" overflow="hidden">
+                    <Text dimColor hover={{ scope: scope(g), dimColor: false, bold: true }}>
+                      ▔
+                    </Text>
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          ),
+          cards: groups.map(g => hoverCard(scope(g), card(g))),
+        }
+      }
+      const tiles = (() => {
+        if (!isStatsOn || !charted || flags.stats === null || Svg === null) return null
+        const stats = flags.stats
+        const reads = ticked('reads', svgChart('reads', chart(stats, 'reads', () => readsChart(stats)), 'Share of each request read from cache'), stats.requests, REQUEST_SLOTS, g => readsCard(g, now))
+        // A tick spanning several pauses shows the longest.
+        const pauses = ticked('pause', svgChart('pauses', chart(stats, `pauses-${info.ttlMin}`, () => pausesChart(stats, info.ttlMin)), 'Your pauses against the cache TTL'), stats.gaps, PAUSE_SLOTS, g =>
+          pauseCard(g.reduce((a, b) => (b.ms > a.ms ? b : a)), info.ttlMin, now),
+        )
+        const size = ticked('size', svgChart('size', chart(stats, 'size', () => sizeChart(stats)), 'Prompt size per request'), stats.requests, REQUEST_SLOTS, g => sizeCard(g, now))
+        return (
           <Box key="charts" justifyContent="space-between" marginTop={1}>
-            {tile('reads', 'Cache reads', readsCaption(flags.stats), chart(flags.stats, 'reads', () => readsChart(flags.stats!)), 'Share of each request read from cache')}
-            {tile('pauses', 'Your pauses', caption('pace')?.value ?? ` vs the ${info.ttlMin === 60 ? '1h' : '5m'} TTL`, chart(flags.stats, `pauses-${info.ttlMin}`, () => pausesChart(flags.stats!, info.ttlMin)), 'Your pauses against the cache TTL')}
-            {tile('size', 'Cached', ` ${kTokens(info.tokens ?? flags.stats.requests[flags.stats.requests.length - 1]?.total ?? 0)} now`, chart(flags.stats, 'size', () => sizeChart(flags.stats!)), 'Prompt size per request')}
+            {tile('reads', 'Cache reads', readsCaption(stats), reads.chart, reads.cards)}
+            {tile('pauses', 'Your pauses', caption('pace')?.value ?? ` vs the ${info.ttlMin === 60 ? '1h' : '5m'} TTL`, pauses.chart, pauses.cards)}
+            {tile('size', 'Cached', ` ${kTokens(info.tokens ?? stats.requests[stats.requests.length - 1]?.total ?? 0)} now`, size.chart, size.cards)}
           </Box>
-        ) : null
+        )
+      })()
       rows.push(
         // Full width, as is the band's own box: the mint overlay below spans
         // this box, which the desktop otherwise sizes to the line's text.

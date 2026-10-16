@@ -1,6 +1,6 @@
 {
   "name": "cache-clock",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "For the Claude Desktop app's Code tab: shows how long each chat's prompt cache stays warm",
   "author": {
     "name": "Jose Vega",
@@ -32,8 +32,8 @@
     "autoCompact": {
       "type": "boolean",
       "title": "Compact before it goes cold",
-      "description": "New chats start with compacting on: shortly before the cache expires (2 minutes before, 1 for a 5m cache), while it is still warm, the chat is compacted, so your next message writes only the summary instead of the whole history. With keep-warm on, that happens once its refreshes are spent; with it off, right away (chats under 30k tokens are left alone). Each chat can switch it with its band button.",
-      "default": false
+      "description": "New chats start with compacting on: shortly before the cache expires (2 minutes before, 1 for a 5m cache), while it is still warm, the chat is compacted, so your next message writes only the summary instead of the whole history. With keep-warm on, that happens once its refreshes are spent; with it off, right away (chats under 30k tokens are left alone). Each chat can switch it with its band button. Off also stops Claude Code's own idle compaction in that chat, as does keep-warm while it still refreshes.",
+      "default": true
     },
     "alert": {
       "type": "string",

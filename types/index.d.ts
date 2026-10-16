@@ -40,6 +40,8 @@ export type KeepWarm = {
   stopped?: string
   /** Prompt tokens the last refresh read from cache. */
   lastRead?: number
+  /** When the cache would have gone cold without this pause's refreshes. */
+  coldAt?: number
 }
 
 /** A request that was predicted warm but read little from cache. */

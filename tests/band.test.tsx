@@ -39,6 +39,7 @@ function engine(on: On) {
     stats: '',
     spend: '',
     tail: '',
+    log: '',
     rateLimits: [] as { kind: string; percentUsed: number; resetsAt?: string }[],
     stopReason: 'end_turn' as string | null,
     agents: [] as { id: string; description: string; type: string; status: string }[],
@@ -57,6 +58,7 @@ function engine(on: On) {
     return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
   })
   on('classic.Stop', () => ({}))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('classic.SessionStart', () => ({}))
   on('classic.PostModelSwitch', () => ({}))
   on('classic.SubagentStop', () => ({}))
@@ -73,6 +75,9 @@ function engine(on: On) {
   on('session.cwd', () => ({ value: '/work/innomed-erp' }))
   on('session.usage', () => ({ value: { startedAt: 0, context: {} as any, rateLimits: world.rateLimits } }))
   on('process.run', (_$, e) => {
+    if (e.argv.join(' ').includes('cache-clock.log')) {
+      return { value: { exitCode: 0, stdout: world.log, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv.join(' ').includes('--argjson since')) {
       return { value: { exitCode: 0, stdout: world.spend, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -253,6 +258,56 @@ test('a model switch reads cold until switched back', async ($, on) => {
   expect(await back.find({ text: /Cache warm/ })).toBeDefined()
 })
 
+// Claude Code's own idle compaction arrives as an `auto` compaction between turns.
+const idleCompact = ($: any) => $.session.compact({ trigger: 'auto', messages: [] })
+
+test('Claude Code\'s idle compaction waits while keep-warm will refresh, and follows the Compact button after', { options: { keepWarm: true, keepWarmMax: 1 } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  await start($)
+  world.stepUsage.push(usage(0, 250_000))
+  await send($)
+  await clock.advance(54 * 60_000)
+
+  // Keep-warm has its refresh to send: the chat is not compacted.
+  expect((await idleCompact($)).skip).toMatch(/keep-warm is holding/)
+  expect(world.compactions).toBe(0)
+
+  // A subagent's turn is not this chat's.
+  await $.turn.start({ text: 'sub', turnId: 's1', agentId: 'a1' } as any)
+  expect((await idleCompact($)).skip).toMatch(/keep-warm is holding/)
+
+  // Inside a turn it is the engine's compaction at the context threshold: never held.
+  await $.turn.start({ text: 'go', turnId: 't2' })
+  expect((await idleCompact($)).skip).toBeUndefined()
+  expect(world.compactions).toBe(1)
+  await $.turn.complete({ turnId: 't2', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
+  // Nor once a prompt is in, before its turn.start arrives.
+  await $.prompt.submit({ text: 'next', asUser: true })
+  expect((await idleCompact($)).skip).toBeUndefined()
+  expect(world.compactions).toBe(2)
+  await $.turn.complete({ turnId: 't3', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
+
+  // Keep-warm off: compacting is on by default, so it goes ahead.
+  await $.command.run({ command: 'keep-warm', args: 'off' })
+  expect((await idleCompact($)).skip).toBeUndefined()
+  expect(world.compactions).toBe(3)
+})
+
+test('with compacting off, Claude Code\'s idle compaction is skipped', { options: { keepWarm: false, autoCompact: false } }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  await start($)
+  world.stepUsage.push(usage(0, 250_000))
+  await send($)
+  await clock.advance(54 * 60_000)
+  expect((await idleCompact($)).skip).toMatch(/compacting is off/)
+  expect(world.compactions).toBe(0)
+  // The person's own /compact is theirs.
+  expect((await $.session.compact({ trigger: 'manual', messages: [] })).skip).toBeUndefined()
+  expect(world.compactions).toBe(1)
+})
+
 test('keep-warm refreshes before expiry, up to its limit, then compacts', { options: { keepWarm: true, keepWarmMax: 2, autoCompact: true }, timeoutMs: 15_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
@@ -331,7 +386,7 @@ test('with keep-warm off, compacting on compacts a big chat before it goes cold,
   expect(world.compactions).toBe(1)
 })
 
-test('keep-warm with compacting off lets a spent cache go cold with the alert; the band button turns compacting on', { options: { keepWarm: true, keepWarmMax: 1 }, timeoutMs: 15_000 }, async ($, on) => {
+test('keep-warm with compacting off lets a spent cache go cold with the alert; the band button turns compacting on', { options: { keepWarm: true, keepWarmMax: 1, autoCompact: false }, timeoutMs: 15_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
   world.stepUsage.push(usage(0, 100_000))
@@ -387,7 +442,7 @@ const paused = (minutes: number[]) => {
   return rows.map(r => r.join('\t')).join('\n')
 }
 
-test('the keep-warm button goes off, on, auto; auto refreshes only while this chat\'s pauses say you are likely back in time', { options: { keepWarm: false, keepWarmMax: 3 }, timeoutMs: 15_000 }, async ($, on) => {
+test('the keep-warm button goes off, on, auto; auto refreshes only while this chat\'s pauses say you are likely back in time', { options: { keepWarm: false, keepWarmMax: 3, autoCompact: false }, timeoutMs: 30_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 100_000_000 })
   const world = engine(on)
   world.stats = paused([70, 75, 80, 90, 100])
@@ -565,12 +620,13 @@ test("the other chats' hover opens with the week across chats: what warm returns
   world.rateLimits = [{ kind: 'seven_day', percentUsed: 36, resetsAt: new Date(now + 86_400_000).toISOString() }]
   const since = now + 86_400_000 - 7 * 86_400_000
   // This chat: $1.30 this week, as the stats test has it.
-  world.spend = ['claude-opus-5-5\tfalse\ttrue\tfalse\t0\t1000000\t0\t0\t10000', 'claude-opus-5-5\ttrue\ttrue\ttrue\t0\t2000000\t100000\t0\t0'].join('\n')
+  world.spend = ['claude-opus-5-5\t0\t1000000\t0\t0\t10000', 'claude-opus-5-5\t0\t2000000\t100000\t0\t0'].join('\n')
   // Another chat's week; one from last week's window is left out.
   world.store.set('spend:erp', { since, total: 8.7, at: now - 3_600_000 })
   world.store.set('spend:older', { since: since - 7 * 86_400_000, total: 99, at: now - 6 * 86_400_000 })
   world.store.set('reward-days', { [day(now)]: 2.5, [day(now - 10 * 86_400_000)]: 100 })
   world.store.set('chat:erp', { label: 'ERP', at: now - 20 * 60_000, ttlMin: 60 })
+  world.store.set('keep-warm:erp', { at: now - 3_600_000, days: { [day(now)]: { paid: 1, saved: 3, refreshes: 10, held: 2, lost: 1 }, [day(now - 10 * 86_400_000)]: { paid: 50 } } })
   await start($)
   world.stepUsage.push(usage(127_000, 0))
   await send($)
@@ -580,7 +636,9 @@ test("the other chats' hover opens with the week across chats: what warm returns
   expect(Math.round((world.store.get('spend:self') as any)?.total * 100)).toBe(130)
   for (const surface of ['desktop', 'terminal'] as const) {
     const band = await $.ui.mount({ plugin: 'cache-clock', surface, ...BAND(false) })
-    expect(await band.find({ text: 'This week, all chats: saved $2.50 · spent $10.00   ' })).toBeDefined()
+    expect(
+      await band.find({ text: 'This week, all chats: saved $2.50 · spent $10.00 · keep-warm ≈$1.00 for 10 refreshes, saved ≈$3.00 on 2 returns: paid back 3.0× · 1 pause went cold anyway   ' }),
+    ).toBeDefined()
     expect(await band.find({ text: /^ERP$/ })).toBeDefined()
   }
 })
@@ -650,6 +708,46 @@ test('an agent id the engine does not list (a fork, a side request) is not shown
   expect(await band.find({ text: /^subagent$/ })).toBeUndefined()
 })
 
+test('a pause past the TTL whose return still read the cache counts as kept warm', async ($, on) => {
+  const clock = mock.clock(on, { now: 20_000_000 })
+  const world = engine(on)
+  world.transcript = '/p/self.jsonl'
+  // A first write; 2h later a read (keep-warm held it); 2h later a rebuild;
+  // 4m later a read.
+  const sec = (ms: number) => Math.floor(ms / 1000)
+  world.stats = [
+    [sec(1_000_000), 10, 0, 50_000],
+    [sec(8_190_000), 'U'],
+    [sec(8_200_000), 10, 50_000, 500],
+    [sec(15_390_000), 'U'],
+    [sec(15_400_000), 10, 0, 51_000],
+    [sec(15_630_000), 'U'],
+    [sec(15_640_000), 10, 51_000, 500],
+  ]
+    .map(r => r.join('\t'))
+    .join('\n')
+  await start($)
+  world.stepUsage.push(usage(51_500, 0))
+  await send($)
+  await clock.advance(10_000)
+
+  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await band.find({ text: /2 over 1h \(1 kept warm\)/ })).toBeDefined()
+  // Each bar's hover card says when the pause began, how long, and how it ended.
+  expect(await band.find({ text: /^\d+:\d\d · 2h away · keep-warm held the cache$/ })).toBeDefined()
+  expect(await band.find({ text: /^\d+:\d\d · 2h away · cache went cold$/ })).toBeDefined()
+  expect(await band.find({ text: /^\d+:\d\d · 4m away · cache still warm$/ })).toBeDefined()
+  // The request charts: at 100 columns a tick spans two requests' bars.
+  expect(await band.find({ text: /^\d+:\d\d · 2 requests · 50% read from cache$/ })).toBeDefined()
+  expect(await band.find({ text: /^\d+:\d\d · 2 requests · 50% read from cache · 1 cache rebuild$/ })).toBeDefined()
+  expect(await band.find({ text: /^\d+:\d\d · 51k → 52k prompt$/ })).toBeDefined()
+  // Wide enough, one each.
+  const wide = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false), props: { ...BAND(false).props, bodyColumns: 160 } })
+  expect(await wide.find({ text: /^\d+:\d\d · 0% read from cache · cache rebuilt$/ })).toBeDefined()
+  expect(await wide.find({ text: /^\d+:\d\d · 99% read from cache$/ })).toBeDefined()
+  expect(await wide.find({ text: /^\d+:\d\d · 52k prompt$/ })).toBeDefined()
+})
+
 test('the band shows cache stats under this chat, and a wide band two subagents to a row', async ($, on) => {
   const clock = mock.clock(on, { now: 10_000_000 })
   const world = engine(on)
@@ -681,8 +779,8 @@ test('the band shows cache stats under this chat, and a wide band two subagents 
   expect(await lone.find({ text: /re-caching 127k/ })).toBeDefined()
   expect(await lone.find({ text: /^ \d+% · 1 rebuild$/ })).toBeDefined()
   expect(await lone.find({ text: /typically 4m · 1 over 1h/ })).toBeDefined()
-  // Nothing spent shows no spend line.
-  expect(await lone.find({ text: /at list price/ })).toBeUndefined()
+  // No refresh this week: nothing spent on keep-warm.
+  expect(await lone.find({ text: ' no refreshes in 7 days, nothing spent' })).toBeDefined()
 
   // The band's stats button switches them off for this chat, and back on.
   await lone.press({ key: 'stats-toggle' })
@@ -959,28 +1057,65 @@ test('without keep-warm a running workflow is named in the expiry toast, not the
   expect(world.toasts[0]).toMatch(/while workflow mint-animation is still running/)
 })
 
-test("the stats show what this chat and its subagents spent today and this week, at list price", async ($, on) => {
+test('the stats weigh what keep-warm paid this week against the rewrites its held returns avoided', { options: { keepWarm: true, keepWarmMax: 1, autoCompact: false }, timeoutMs: 30_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000_000 })
   const world = engine(on)
   world.transcript = '/p/self.jsonl'
-  // This week: main 1M read, 10k out ($0.40); subagents 2M read, 100k 5m
-  // writes ($0.90), today. Today but before the window: main again ($0.40).
-  world.spend = [
-    'claude-opus-5-5\tfalse\ttrue\tfalse\t0\t1000000\t0\t0\t10000',
-    'claude-opus-5-5\ttrue\ttrue\ttrue\t0\t2000000\t100000\t0\t0',
-    'claude-opus-5-5\tfalse\tfalse\ttrue\t0\t1000000\t0\t0\t10000',
-  ].join('\n')
   await start($)
-  world.stepUsage.push(usage(127_000, 0))
+  world.stepUsage.push(usage(0, 250_000))
   await send($)
-  await clock.advance(10_000)
-  const band = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
-  expect(await band.find({ text: ' ≈$1.30 today · ≈$1.30 in 7 days ($0.90 subagents), at list price' })).toBeDefined()
+  // One refresh ($0.02 at list price), then a return past the cache's own
+  // expiry that read it: a 250k rewrite avoided ($1.95).
+  await clock.advance(59 * 60_000)
+  expect(world.forks).toBe(1)
+  await clock.advance(4 * 60_000)
+  world.stepUsage.push(usage(250_000, 0))
+  await send($)
+  const held = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await held.find({ text: ' in 7 days ≈$0.02 for 1 refresh, saved ≈$1.95 on 1 return: paid back 96.8×' })).toBeDefined()
 
-  // With a weekly rate-limit window it counts from that window's start.
-  world.rateLimits = [{ kind: 'seven_day', percentUsed: 36, resetsAt: new Date(10_000_000 + 86_400_000).toISOString() }]
+  // The next pause outlasts the refresh: it went cold anyway.
+  await clock.advance(59 * 60_000)
+  expect(world.forks).toBe(2)
+  await clock.advance(70 * 60_000)
+  world.stepUsage.push(usage(0, 250_000))
+  await send($)
+  const lost = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await lost.find({ text: ' in 7 days ≈$0.04 for 2 refreshes, saved ≈$1.95 on 1 return: paid back 48.4× · 1 pause went cold anyway' })).toBeDefined()
+  expect((world.store.get('keep-warm:self') as any)?.days).toBeDefined()
+})
+
+test("a chat's keep-warm from before the ledger comes from the log, counting only refreshes sent while it sat idle", { timeoutMs: 30_000 }, async ($, on) => {
+  const now = 10_000_000_000
+  const clock = mock.clock(on, { now })
+  const world = engine(on)
+  world.transcript = '/p/self.jsonl'
+  const sec = (ms: number) => Math.floor(ms / 1000)
+  const t1 = now - 6 * 3_600_000
+  const back1 = t1 + 70 * 60_000
+  const t2 = now - 3 * 3_600_000
+  const back2 = t2 + 130 * 60_000
+  // A pause past the TTL that came back to the cache, and one that rebuilt it.
+  world.stats = [
+    [sec(t1), 10, 0, 200_000],
+    [sec(back1) - 1, 'U'],
+    [sec(back1), 10, 200_000, 500],
+    [sec(t2), 10, 200_000, 500],
+    [sec(back2) - 1, 'U'],
+    [sec(back2), 10, 0, 210_000],
+  ]
+    .map(r => r.join('\t'))
+    .join('\n')
+  // $0.04 each; the first was sent before this chat ran, so another chat of the same name sent it.
+  const line = (at: number) => `${new Date(at).toISOString()} innomed-erp · refresh read 200k of 200k tokens from cache (read 200000, write 0, input 47)`
+  world.log = [t1 - 10 * 60_000, t1 + 58 * 60_000, t2 + 58 * 60_000, t2 + 116 * 60_000].map(line).join('\n')
   await start($)
-  await clock.advance(10_000)
-  const later = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
-  expect(await later.find({ text: /≈\$1\.30 this week/ })).toBeDefined()
+  world.stepUsage.push(usage(200_000, 0))
+  await send($)
+  await clock.advance(6 * 60_000)
+  const text = ' in 7 days ≈$0.12 for 3 refreshes, saved ≈$1.56 on 1 return: paid back 12.9× · 1 pause went cold anyway'
+  expect(await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).find({ text })).toBeDefined()
+  // Once: the next read of the stats adds nothing.
+  await clock.advance(6 * 60_000)
+  expect(await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).find({ text })).toBeDefined()
 })

@@ -54,8 +54,8 @@ Then open a chat in the **Code** tab, or run `/reload-plugins` in a chat that's 
 | 🗜️ **Compact** | Compacts the chat while its cache is still warm, so your next message writes only the summary instead of the whole history. [More below.](#%EF%B8%8F-compact) |
 | 💡 **New cache** | An LED panel lights up across the band and breaks away, to a little tune of its own (mallets and bells, in step with the lights). |
 | ⚠️ **Misses** | When a message should have read the cache and didn't, the band says so. If it can see why, it names the cause: an MCP server that connected or left, a tool that was added, removed or reworded, a changed section of the system prompt, or a new effort level. |
-| 🗂️ **Other chats** | How many of your other chats have a cache. Hover the count to see how long each one has left, soonest first (with Stats off, the list shows under the band). The list opens with the week across all chats: what warm returns saved, and what every chat spent at list price, counting the chats that ran this week with the mod. |
-| 📊 **Stats** | What going cold would cost compared with reading the cache warm, how much of this chat was read from cache, and how often the cache was rebuilt, with charts of both. Also what this chat and its subagents spent today and this week (your plan's weekly window, else the last 7 days), at list price. |
+| 🗂️ **Other chats** | How many of your other chats have a cache. Hover the count to see how long each one has left, soonest first (with Stats off, the list shows under the band). The list opens with the week across all chats: what warm returns saved, what every chat spent at list price, and whether keep-warm paid for itself, counting the chats that ran this week with the mod. |
+| 📊 **Stats** | What going cold would cost compared with reading the cache warm, how much of this chat was read from cache, and how often the cache was rebuilt, with charts of both; hover the ticks under a chart for each request or pause. Also whether keep-warm paid for itself this week (your plan's weekly window, else the last 7 days): what its refreshes cost against the rewrites they saved, at list price. |
 | 🤖 **Subagents & workflows** | Their caches, and how much a running workflow has read from cache. |
 | 🔇 **Sound** | One button mutes every sound the mod makes, in every chat. |
 | 🎉 **Reward** | Each time you come back to a warm cache, Clawd celebrates what you saved. [See it below.](#-the-reward) |
@@ -85,12 +85,14 @@ When keep-warm is off, or has spent its refreshes, you get a toast and a sound a
 
 ## 🗜️ Compact
 
-Turn on compacting for a chat with the **Compact** band button. About 2 minutes before the cache expires (1 minute for a 5-minute cache), the mod **compacts the chat while the cache is still warm**, so your next message writes only the summary instead of the whole history.
+**Compacting is on by default** (switch it per chat with the **Compact** band button). About 2 minutes before the cache expires (1 minute for a 5-minute cache), the mod **compacts the chat while the cache is still warm**, so your next message writes only the summary instead of the whole history.
 
 - **With keep-warm on**, compacting happens once keep-warm's refreshes are spent.
 - **With keep-warm off**, it happens right away, for chats of 30k tokens or more. Summarizing a smaller chat costs about as much as caching it again.
 
 The expiry alert tells you a compaction is coming. If you send a message first, the full history is kept.
+
+**Claude Code's own idle compaction.** Claude Code is rolling out a compaction of its own: about 54 minutes into an hour's cache, while you're away, it compacts chats of 200k tokens or more. The mod lets it run only where the mod would compact too. While keep-warm still has refreshes to send, or with **Compact** off, it's skipped quietly; `~/.claude/cache-clock.log` notes each one and why. To turn it off everywhere instead, set `"idleCompaction": false` in `~/.claude/settings.json`.
 
 ## 🎉 The reward
 
@@ -133,7 +135,7 @@ echo '{"reward":"animation"}' | claude plugin configure cache-clock@cache-clock 
 |---|---|---|---|
 | Keep warm by default | `keepWarm` | on | New chats start with keep-warm on |
 | Keep-warm refreshes per idle stretch | `keepWarmMax` | 3 | How many refreshes after your last message before keep-warm stops (and compacts, if compacting is on) |
-| Compact before it goes cold | `autoCompact` | off | New chats start with compacting on |
+| Compact before it goes cold | `autoCompact` | on | New chats start with compacting on; off also skips Claude Code's idle compaction |
 | Expiry alert | `alert` | toast+sound | `toast+sound`, `toast` or `off`; used when keep-warm is off |
 | Show other chats | `otherChats` | on | Lists your other chats' caches in the band |
 | Warm-cache reward | `reward` | animation+sound | `animation+sound`, `animation` or `off` |

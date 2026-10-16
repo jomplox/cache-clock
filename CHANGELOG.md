@@ -2,6 +2,17 @@
 
 Each version is tagged `v<version>`; releases from 0.23.1 on are on the [Releases page](https://github.com/jomplox/cache-clock/releases).
 
+## 0.25.0 (2026-10-16)
+
+- Claude Code's own idle compaction (rolling out: about 54 minutes into an hour's cache, it compacts chats of 200k tokens or more) now follows the mod. While keep-warm still has refreshes to send, it's skipped, so keep-warm gets to refresh; with **Compact** off, it's skipped too. It's skipped quietly; the log notes each one and why. Elsewhere it runs, and the mod's own compaction covers what it doesn't (smaller chats, 5-minute caches, a pause it passed on).
+- Compacting is on by default for new chats, so where keep-warm is done the chat is still compacted before it goes cold, as Claude Code would. Set **Compact before it goes cold** off to go back.
+- Stats: the `Spent` line gives way to whether keep-warm pays for itself this week: what its refreshes cost, the rewrites it saved (a return after the cache's own expiry that read it warm), and the verdict, `≈$0.62 for 9 refreshes, saved ≈$4.10 on 2 returns: paid back 6.6× · 1 pause went cold anyway`. A chat's refreshes from before this version are read once from `~/.claude/cache-clock.log`, which names chats by title, so those of a chat since renamed are missed. The other chats' list opens with the same across all chats. The current pause's refreshes are now labelled `This pause`.
+
+## 0.24.1 (2026-10-15)
+
+- Stats: a pause longer than the cache's TTL shows green when you came back to a warm cache anyway (keep-warm held it), and orange only when the cache had to be written again. The caption counts them: `5 over 1h (all kept warm)`.
+- Stats: each chart has a row of ticks to hover. A pause's says when it began, how long you were away, and what happened to the cache (`14:02 · 1h 12m away · keep-warm held the cache`); a request's, how much it read from cache and whether it rebuilt it, and the prompt it sent. Where bars are narrower than a character, a tick spans a few.
+
 ## 0.24.0 (2026-10-15)
 
 - Keep-warm is on by default for new chats. A refresh costs a cache read, about a twentieth of re-writing the cache, so keeping it warm through a pause pays off when you come back. Set **Keep warm by default** off to go back; a chat's own pick (band button or `/keep-warm`) still wins.
