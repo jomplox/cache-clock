@@ -641,6 +641,13 @@ test("the other chats' hover opens with the week across chats: what warm returns
     ).toBeDefined()
     expect(await band.find({ text: /^ERP$/ })).toBeDefined()
   }
+
+  // Stats off, the week's figures go with them; the list is labelled instead.
+  await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).press({ key: 'stats-toggle' })
+  const off = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await off.find({ text: /This week/ })).toBeUndefined()
+  expect(await off.find({ text: 'Other chats  ' })).toBeDefined()
+  expect(await off.find({ text: /^ERP$/ })).toBeDefined()
 })
 
 test('/keep-warm now refreshes at once while warm, and refuses when cold', { options: { keepWarm: false } }, async ($, on) => {
@@ -737,12 +744,13 @@ test('a pause past the TTL whose return still read the cache counts as kept warm
   expect(await band.find({ text: /^\d+:\d\d · 2h away · keep-warm held the cache$/ })).toBeDefined()
   expect(await band.find({ text: /^\d+:\d\d · 2h away · cache went cold$/ })).toBeDefined()
   expect(await band.find({ text: /^\d+:\d\d · 4m away · cache still warm$/ })).toBeDefined()
-  // The request charts: at 100 columns a tick spans two requests' bars.
-  expect(await band.find({ text: /^\d+:\d\d · 2 requests · 50% read from cache$/ })).toBeDefined()
-  expect(await band.find({ text: /^\d+:\d\d · 2 requests · 50% read from cache · 1 cache rebuild$/ })).toBeDefined()
-  expect(await band.find({ text: /^\d+:\d\d · 51k → 52k prompt$/ })).toBeDefined()
-  // Wide enough, one each.
-  const wide = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false), props: { ...BAND(false).props, bodyColumns: 160 } })
+  // The request charts: at 60 columns a tick spans two requests' bars.
+  const narrow = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false), props: { ...BAND(false).props, bodyColumns: 60 } })
+  expect(await narrow.find({ text: /^\d+:\d\d · 2 requests · 50% read from cache$/ })).toBeDefined()
+  expect(await narrow.find({ text: /^\d+:\d\d · 2 requests · 50% read from cache · 1 cache rebuild$/ })).toBeDefined()
+  expect(await narrow.find({ text: /^\d+:\d\d · 51k → 52k prompt$/ })).toBeDefined()
+  // At 100, as the desktop counts its band, one each.
+  const wide = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
   expect(await wide.find({ text: /^\d+:\d\d · 0% read from cache · cache rebuilt$/ })).toBeDefined()
   expect(await wide.find({ text: /^\d+:\d\d · 99% read from cache$/ })).toBeDefined()
   expect(await wide.find({ text: /^\d+:\d\d · 52k prompt$/ })).toBeDefined()

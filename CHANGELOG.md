@@ -2,6 +2,11 @@
 
 Each version is tagged `v<version>`; releases from 0.23.1 on are on the [Releases page](https://github.com/jomplox/cache-clock/releases).
 
+## 0.25.1 (2026-10-16)
+
+- With Stats off, the other chats' row under the band is just the list, labelled `Other chats` and separated by `·`; the week's figures stay with the stats.
+- The charts' hover ticks are one per bar again wherever a bar is at least half a text cell wide; they took two bars each as soon as a chart held more bars than its width in cells.
+
 ## 0.25.0 (2026-10-16)
 
 - Claude Code's own idle compaction (rolling out: about 54 minutes into an hour's cache, it compacts chats of 200k tokens or more) now follows the mod. While keep-warm still has refreshes to send, it's skipped, so keep-warm gets to refresh; with **Compact** off, it's skipped too. It's skipped quietly; the log notes each one and why. Elsewhere it runs, and the mod's own compaction covers what it doesn't (smaller chats, 5-minute caches, a pause it passed on).

@@ -466,10 +466,11 @@ const PAUSE_SLOTS = 24
 const REQUEST_SLOTS = 40
 
 // Hovering a chart: a row of ticks under it, each over the bars it spans and
-// at least a cell wide, so where bars are narrower than a cell a tick takes
-// a few, the most recent singly. Groups from the right end, oldest first.
+// at least half a cell wide (the desktop's cells are its monospace font's,
+// wider than a bar a cell would hold), so where bars are narrower a tick
+// takes a few, the most recent singly. Groups from the right end, oldest first.
 function tickGroups<T>(items: T[], slots: number, cols: number): T[][] {
-  const per = Math.max(1, Math.ceil(slots / Math.max(1, cols)))
+  const per = Math.max(1, Math.ceil(slots / Math.max(1, 2 * cols)))
   const groups: T[][] = []
   for (let end = items.length; end > 0; end -= per) groups.unshift(items.slice(Math.max(0, end - per), end))
   return groups
@@ -1899,24 +1900,27 @@ export const register: Register = (on, options) => {
     // Other chats stay out of the way: a dim count on this chat's line, and
     // the list itself on hover.
     const chats = s.otherChats ? otherChatsShown(await read($, others), now) : []
-    const week = flags.week !== null && flags.week.spent + flags.week.saved >= 0.005 ? flags.week : null
+    const isStatsOn = (await read($, showStats)) ?? s.stats
+    // The week's figures are stats: with Stats off the list stands alone, labelled.
+    const week = isStatsOn && flags.week !== null && flags.week.spent + flags.week.saved >= 0.005 ? flags.week : null
     const chatList =
       chats.length > 0 ? (
         <Text key="chat-list" wrap="truncate-end">
           {week !== null ? (
             <Text>{`This week, all chats: saved ${usd(week.saved)} · spent ${usd(week.spent)}${week.kw.paid >= 0.005 ? ` · keep-warm ${kwVerdict(week.kw)}` : ''}   `}</Text>
-          ) : null}
+          ) : isStatsOn ? null : (
+            <Text>Other chats  </Text>
+          )}
           {chats.slice(0, 5).map((c, i) => (
             <Text key={`chat-${c.id}`} dimColor>
-              {i > 0 ? '   ' : ''}
+              {i > 0 ? ' · ' : ''}
               <Text italic>{c.title}</Text>
               {` ${c.status}`}
             </Text>
           ))}
-          {chats.length > 5 ? <Text dimColor>{`   +${chats.length - 5} more`}</Text> : null}
+          {chats.length > 5 ? <Text dimColor>{` · +${chats.length - 5} more`}</Text> : null}
         </Text>
       ) : null
-    const isStatsOn = (await read($, showStats)) ?? s.stats
     // Read from the store every 2s, not every frame; another chat's press shows then.
     const hasSound = flags.hasSound ?? (flags.hasSound = await isSoundOn($))
     const prize = await read($, reward)
