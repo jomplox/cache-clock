@@ -2,6 +2,10 @@
 
 Each version is tagged `v<version>`; releases from 0.23.1 on are on the [Releases page](https://github.com/jomplox/cache-clock/releases).
 
+## 0.24.0 (2026-10-15)
+
+- Keep-warm is on by default for new chats. A refresh costs a cache read, about a twentieth of re-writing the cache, so keeping it warm through a pause pays off when you come back. Set **Keep warm by default** off to go back; a chat's own pick (band button or `/keep-warm`) still wins.
+
 ## 0.23.5 (2026-10-15)
 
 - A message sent as the chat compacts (one queued from another chat, say) is no longer flagged as a cache miss: it went out before the compaction reached the mod, so the old cache looked skipped. The mod now checks the transcript for a compaction before calling a miss.

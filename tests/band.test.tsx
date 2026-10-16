@@ -932,7 +932,7 @@ test('keep-warm holds the cache while a workflow runs, then goes back to its lim
   expect(await after.find({ text: /ended/ })).toBeDefined()
 })
 
-test('without keep-warm a running workflow is named in the expiry toast, not the band; its run stats and the cold cost show', async ($, on) => {
+test('without keep-warm a running workflow is named in the expiry toast, not the band; its run stats and the cold cost show', { options: { keepWarm: false } }, async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const world = engine(on)
   on('tool.call', () => ({ result: WORKFLOW as any }))

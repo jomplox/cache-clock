@@ -51,7 +51,7 @@ type Settings = { keepWarm: boolean; keepWarmMax: number; compact: boolean; aler
 
 function settings(options: PluginOptions): Settings {
   return {
-    keepWarm: options.keepWarm === true,
+    keepWarm: options.keepWarm !== false,
     keepWarmMax: typeof options.keepWarmMax === 'number' ? Math.max(0, options.keepWarmMax) : 3,
     compact: options.autoCompact === true,
     alert: typeof options.alert === 'string' ? options.alert : 'toast+sound',

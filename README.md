@@ -25,7 +25,7 @@ Claude Code caches your conversation so each new message only pays full price fo
 
 ### Keep-warm
 
-Turn on keep-warm for a chat (band button, or `/keep-warm on`) and, shortly before the cache expires, the mod sends one small request that reads it and resets its timer. That costs a cache read, about a twentieth of re-writing it. After a set number of refreshes (3 by default), it stops, and the cache goes cold with the alert below, unless compacting is on. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that's cheaper than re-caching.
+Keep-warm is on by default (switch it per chat with the band button or `/keep-warm`, or for new chats with the setting below): shortly before the cache expires, the mod sends one small request that reads it and resets its timer. That costs a cache read, about a twentieth of re-writing it. After a set number of refreshes (3 by default), it stops, and the cache goes cold with the alert below, unless compacting is on. While a workflow or background agent of the chat is still running, it keeps refreshing for as long as that's cheaper than re-caching.
 
 Press the button again for **auto** (or `/keep-warm auto`): it refreshes only when your past pauses in this chat say you're likely back before the refresh runs out. Of the pauses that lasted at least as long as this one has so far, enough must have ended in time to pay for the refresh (a read costs a small fraction of a rewrite). With fewer than 4 such pauses on record, it doesn't refresh. Where it holds off, the band says so, and the alert or compacting follows as if its refreshes were spent. The button goes off → on → auto → off.
 
@@ -70,7 +70,7 @@ Asked when you install. To change one later, from a terminal: `echo '{"reward":"
 
 | Setting | Default | |
 |---|---|---|
-| Keep warm by default | off | New chats start with keep-warm on |
+| Keep warm by default | on | New chats start with keep-warm on |
 | Keep-warm refreshes per idle stretch | 3 | Refreshes after your last message before it stops (and compacts, if compacting is on) |
 | Compact before it goes cold | off | New chats start with compacting on |
 | Expiry alert | toast+sound | `toast+sound`, `toast` or `off`, when keep-warm is off |
