@@ -9,7 +9,7 @@ A mod for the **Code tab of the Claude Desktop app**. It shows each chat's promp
 [![Release](https://img.shields.io/github/v/release/jomplox/cache-clock?color=d97757&label=release)](https://github.com/jomplox/cache-clock/releases)
 [![License](https://img.shields.io/github/license/jomplox/cache-clock?color=555)](LICENSE)
 ![Claude Desktop](https://img.shields.io/badge/Claude_Desktop-Code_tab-d97757)
-![macOS](https://img.shields.io/badge/macOS-only-555)
+![macOS | Windows](https://img.shields.io/badge/macOS_%7C_Windows-555)
 
 [Install](#-install) · [What it does](#-what-it-does) · [Keep-warm](#-keep-warm) · [The reward](#-the-reward) · [Settings](#%EF%B8%8F-settings)
 
@@ -40,7 +40,10 @@ claude plugin install cache-clock@cache-clock
 
 Then open a chat in the **Code** tab, or run `/reload-plugins` in a chat that's already open. The band appears above the prompt.
 
-**You need:** the Claude Desktop app on macOS (sounds play through `afplay`), and `jq` on your `PATH` (the mod uses it to read the transcript for the TTL and the stats).
+**You need:** the Claude Desktop app on macOS or Windows.
+
+- **macOS:** `jq` on your `PATH` (the mod uses it to read the transcript for the TTL and the stats). Sounds play through `afplay`.
+- **Windows:** nothing more. The mod reads the transcript and its log with Claude Code's own file access, so it needs no `sh`, `tail`, `grep` or `jq`. Sounds play through Windows PowerShell's `Media.SoundPlayer`. Ranged file reads need Claude Code 2.1.326 or later: on older versions the stats skip chats whose transcript is over 4 MiB.
 
 > [!NOTE]
 > **Made for Claude Desktop, not the `claude` CLI.** The band, its buttons, the charts and every animation are drawn for Desktop's Code tab. In a terminal session the mod still loads, but you get a plain text line and none of the visuals. It isn't designed or tested there.

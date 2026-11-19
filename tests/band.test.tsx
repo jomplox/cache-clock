@@ -57,6 +57,8 @@ function engine(on: On) {
     tools: [] as { name: string; description: string; mcp: boolean }[],
     sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }],
     soundReads: 0,
+    // Every command the mod ran.
+    ran: [] as string[][],
   }
   on('ui.render', ($$, e) => {
     const { Box } = $$.ui.resolve(e)
@@ -87,6 +89,7 @@ function engine(on: On) {
   on('session.cwd', () => ({ value: '/work/innomed-erp' }))
   on('session.usage', () => ({ value: { startedAt: 0, context: world.context, rateLimits: world.rateLimits } }))
   on('process.run', (_$, e) => {
+    world.ran.push([...e.argv])
     if (e.argv.join(' ').includes('cache-clock.log')) {
       if (e.argv[2]?.includes('>>')) world.logged.push(e.argv[4] ?? '')
       return { value: { exitCode: 0, stdout: world.log, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -1445,4 +1448,96 @@ test("a chat's keep-warm from before the ledger comes from the log, counting onl
   // Once: the next read of the stats adds nothing.
   await clock.advance(6 * 60_000)
   expect(await (await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })).find({ text })).toBeDefined()
+})
+
+// Windows has no /bin/sh, tail, grep, jq or afplay. The files the mod reads
+// and writes through $.fs, every command it runs, and every child it starts.
+function windows(on: On) {
+  const files = new Map<string, string>()
+  const spawned: { argv: readonly string[]; env?: Record<string, string> }[] = []
+  const norm = (path: string) => path.replace(/\\/g, '/')
+  const text = (path: string) => {
+    const found = files.get(norm(path))
+    if (found === undefined) throw new Error(`ENOENT: ${path}`)
+    return found
+  }
+  on('fs.stat', (_$, e) => ({ value: { kind: 'file' as const, size: text(e.path).length, mtimeMs: 2_000_000_000_000, isLink: false } }))
+  on('fs.read', (_$, e) => {
+    const from = e.offset ?? 0
+    return { value: text(e.path).slice(from, e.length === undefined ? undefined : from + e.length) }
+  })
+  on('fs.exists', (_$, e) => ({ value: files.has(norm(e.path)) }))
+  on('fs.list', (_$, e) => {
+    const dir = `${norm(e.path).replace(/\/$/, '')}/`
+    const entries = new Map<string, 'file' | 'dir'>()
+    for (const path of files.keys()) {
+      if (!path.startsWith(dir)) continue
+      const [name, ...more] = path.slice(dir.length).split('/')
+      entries.set(name!, more.length ? 'dir' : 'file')
+    }
+    return { value: [...entries].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
+  })
+  on('fs.write', (_$, e) => {
+    files.set(norm(e.path), e.text)
+    return { value: undefined }
+  })
+  on('env.get', (_$, e) => ({ value: e.name === 'OS' ? 'Windows_NT' : e.name === 'USERPROFILE' ? 'C:\\Users\\me' : undefined }))
+  on('process.spawn', async function* (_$, e) {
+    spawned.push({ argv: e.argv, env: e.env })
+    return { value: { code: 0, signal: null } }
+  })
+  return { files, spawned }
+}
+
+test('on Windows the transcript is read through $.fs, with no shell: the TTL and the stats', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000_000 })
+  const world = engine(on)
+  const win = windows(on)
+  world.transcript = 'C:\\Users\\me\\.claude\\projects\\C--work\\self.jsonl'
+  const row = (sec: number, o: object) => JSON.stringify({ timestamp: new Date(sec * 1000).toISOString(), isSidechain: false, ...o })
+  const reply = (sec: number, id: string, read: number, write: number) =>
+    row(sec, { type: 'assistant', requestId: id, message: { id, model: 'claude-opus-5-5', usage: { ...usage(read, write), cache_creation: { ephemeral_5m_input_tokens: write } } } })
+  win.files.set(
+    'C:/Users/me/.claude/projects/C--work/self.jsonl',
+    [
+      row(990, { type: 'user', message: { role: 'user', content: 'go' } }),
+      // A response's rows repeat its usage; it counts once.
+      reply(1_000, 'm1', 0, 50_000),
+      reply(1_000, 'm1', 0, 50_000),
+      // A tool's result is no prompt of the person's.
+      row(1_001, { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } }),
+      row(1_060, { type: 'user', message: { role: 'user', content: 'and now?' } }),
+      reply(1_070, 'm2', 50_000, 1_000),
+      row(1_071, { type: 'custom-title', customTitle: 'Windows chat' }),
+    ].join('\n') + '\n',
+  )
+  await start($)
+  world.stepUsage.push(usage(0, 50_000))
+  await send($)
+  await $.classic.Stop({ transcript_path: world.transcript } as any)
+  await clock.advance(1_000)
+  const terminal = await $.ui.mount({ plugin: 'cache-clock', surface: 'terminal', ...BAND(false) })
+  expect(await terminal.find({ text: /^ 49% · no rebuilds$/ })).toBeDefined()
+  const desktop = await $.ui.mount({ plugin: 'cache-clock', surface: 'desktop', ...BAND(false) })
+  expect(await desktop.find({ text: /\(5m TTL\)/ })).toBeDefined()
+  expect(world.ran).toEqual([])
+})
+
+test('on Windows the sounds play through PowerShell, and keep-warm keeps its log through $.fs', { options: { keepWarm: true, keepWarmMax: 2, autoCompact: true }, timeoutMs: 15_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const world = engine(on)
+  const win = windows(on)
+  win.files.set('C:/Users/me/.claude/cache-clock.log', 'earlier line\n')
+  world.stepUsage.push(usage(0, 100_000))
+  await start($)
+  await send($)
+  await clock.advance(1_000)
+  expect(world.sounds).toEqual([])
+  expect(win.spawned[0]?.argv[0]).toBe('powershell.exe')
+  expect(win.spawned[0]?.env?.CACHE_CLOCK_SOUND).toMatch(/[\\/]sounds\/mint\.wav$/)
+
+  await clock.advance(57 * 60_000 + 90_000)
+  expect(world.forks).toBe(1)
+  expect(win.files.get('C:/Users/me/.claude/cache-clock.log')).toMatch(/^earlier line\n\S+ .* · refresh read .*\(read 100000, write 0, input 10\)\n$/)
+  expect(world.ran).toEqual([])
 })

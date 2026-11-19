@@ -2,6 +2,11 @@
 
 Each version is tagged `v<version>`; releases from 0.23.1 on are on the [Releases page](https://github.com/jomplox/cache-clock/releases).
 
+## Unreleased
+
+- **Windows support.** Windows has no `/bin/sh`, `tail`, `grep`, `jq` or `afplay`, so on Windows the countdown's TTL, the stats, the week's spend, the chat's title and the log were missing, and the sounds were silent. There the mod now reads the transcripts (4 MiB at a time) and `cache-clock.log` through `$.fs`, with the same results the shell scripts give, and plays its sounds through Windows PowerShell. It tells Windows by the `OS` variable. macOS is unchanged.
+- The chat's name falls back to its folder's name on Windows paths too.
+
 ## 0.27.0 (2026-11-01)
 
 - Stats: the third chart is now **Context**, how full this chat's context window is at each request, in place of the cached-size chart. Its caption gives the count, the percent full and, at this chat's pace, the turns until auto-compaction: `142k of 200k · 71% · auto in ~6 turns`. A dashed line marks where auto-compaction starts, and the graph turns orange when that's about 3 turns away. With an auto-compact window set (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` or the settings), the chart, the count and the advice measure against that window, as `/context` does, not the model's full window.

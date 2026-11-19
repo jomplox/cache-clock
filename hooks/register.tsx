@@ -212,6 +212,194 @@ awk -F'\\t' '{ if (!($1 in out) || $7 > out[$1]) { out[$1] = $7; row[$1] = $2 "\
   END { for (id in row) { split(row[id], f, "\\t"); k = f[1]; i[k] += f[2]; r[k] += f[3]; w5[k] += f[4]; w1[k] += f[5]; o[k] += out[id] }
         for (k in i) print k "\\t" i[k] "\\t" r[k] "\\t" w5[k] "\\t" w1[k] "\\t" o[k] }'`
 
+// Windows has no /bin/sh, tail, grep, jq or afplay. There the mod reads the
+// transcripts and its log through $.fs, giving the shell scripts' output
+// line for line, and plays its sounds through PowerShell.
+
+// The most one $.fs.read returns.
+const CHUNK = 4 * 1024 * 1024
+
+// Windows sets OS for every process. (`$.session.info()` names the platform
+// too, but engines without it refuse to load a module that calls it.) Asked
+// once per load.
+let windowsOS: Promise<boolean> | undefined
+const isWindows = ($: EngineInterface) =>
+  (windowsOS ??= $.env.get('OS').then(
+    os => os === 'Windows_NT',
+    () => false,
+  ))
+
+// What a $.process.run that printed `stdout` would answer.
+const asRun = (stdout: string) => ({ exitCode: 0, stdout, isStdoutTruncated: false })
+
+// `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`.
+async function configDir($: EngineInterface): Promise<string> {
+  const set = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  if (set) return set
+  const home = (await $.env.get('USERPROFILE').catch(() => undefined)) || (await $.env.get('HOME').catch(() => undefined)) || ''
+  return `${home}/.claude`
+}
+
+// `tail -c <bytes> <path>`.
+async function tailFile($: EngineInterface, path: string, bytes: number): Promise<string> {
+  const { size } = await $.fs.stat(path)
+  const offset = Math.max(0, size - bytes)
+  return size > offset ? $.fs.read(path, { as: 'text', offset, length: size - offset }) : ''
+}
+
+// `grep`: the lines of a file that `keep` accepts, read 4 MiB at a time. A
+// read that cuts a character puts U+FFFD at its edge, which leaves the JSON
+// rows parseable: every character that cut can split sits inside a string.
+async function grepFile($: EngineInterface, path: string, keep: (line: string) => boolean): Promise<string[]> {
+  const { size } = await $.fs.stat(path)
+  const found: string[] = []
+  let rest = ''
+  for (let offset = 0; offset < size; offset += CHUNK) {
+    const lines = (rest + (await $.fs.read(path, { as: 'text', offset, length: Math.min(CHUNK, size - offset) }))).split('\n')
+    rest = lines.pop() ?? ''
+    for (const line of lines) if (keep(line)) found.push(line)
+  }
+  if (rest && keep(rest)) found.push(rest)
+  return found
+}
+
+const parseRow = (line: string): any => {
+  try {
+    return JSON.parse(line)
+  } catch {
+    return null
+  }
+}
+
+// jq's `.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601`.
+const epochSeconds = (ts: unknown) => Math.floor(Date.parse(String(ts)) / 1000)
+
+// STATS_SCRIPT's output: one line per distinct request (epoch seconds,
+// uncached input, cache read, cache write) and per prompt of the person's
+// (epoch seconds, "U").
+async function statsRows($: EngineInterface, path: string): Promise<string> {
+  const lines = await grepFile($, path, l => (l.includes('"cache_read_input_tokens"') || l.includes('"type":"user"')) && !l.includes('"isSidechain":true'))
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const line of lines) {
+    const row = parseRow(line)
+    const sec = epochSeconds(row?.timestamp)
+    if (!Number.isFinite(sec)) continue
+    const u = row.message?.usage
+    if (row.type === 'assistant' && u && row.message.model !== '<synthetic>') {
+      const id = String(row.message.id || row.requestId || '')
+      if (id && seen.has(id)) continue
+      seen.add(id)
+      out.push(`${sec}\t${u.input_tokens || 0}\t${u.cache_read_input_tokens || 0}\t${u.cache_creation_input_tokens || 0}`)
+    } else if (row.type === 'user' && row.isMeta !== true && row.isCompactSummary !== true) {
+      const content = row.message?.content
+      const isToolResult = Array.isArray(content) && content.some((b: any) => b?.type === 'tool_result')
+      if (typeof content === 'string' || !isToolResult) out.push(`${sec}\tU\t\t`)
+    }
+  }
+  return out.join('\n')
+}
+
+// Every .jsonl file under a folder, at any depth (`find <dir> -name '*.jsonl'`).
+async function jsonlUnder($: EngineInterface, dir: string): Promise<string[]> {
+  const found: string[] = []
+  for (const e of await $.fs.list(dir).catch(() => [])) {
+    const path = `${dir}/${e.name}`
+    if (e.kind === 'dir') found.push(...(await jsonlUnder($, path)))
+    else if (e.kind === 'file' && e.name.endsWith('.jsonl')) found.push(path)
+  }
+  return found
+}
+
+// SPEND_SCRIPT's output: what the chat and its subagents spent since
+// `since` (epoch seconds), per model ("model, input, read, 5m write, 1h write,
+// output"). A response's rows repeat its usage; the one with the most output
+// counts. Only files written since then are read.
+async function spendRows($: EngineInterface, transcript: string, since: number): Promise<string> {
+  const files = [transcript, ...(await jsonlUnder($, `${transcript.replace(/\.jsonl$/, '')}/subagents`))]
+  const best = new Map<string, { output: number; model: string; counts: number[] }>()
+  for (const file of files) {
+    const stat = await $.fs.stat(file).catch(() => null)
+    if (!stat || stat.kind !== 'file' || stat.mtimeMs <= since * 1000) continue
+    for (const line of await grepFile($, file, l => l.includes('"cache_read_input_tokens"'))) {
+      const row = parseRow(line)
+      const u = row?.message?.usage
+      if (row?.type !== 'assistant' || !u || row.message.model === '<synthetic>') continue
+      if (!(epochSeconds(row.timestamp) >= since)) continue
+      const h = u.cache_creation?.ephemeral_1h_input_tokens ?? 0
+      const w5 = u.cache_creation?.ephemeral_5m_input_tokens ?? (u.cache_creation_input_tokens ?? 0) - h
+      const id = String(row.message.id || row.requestId || '')
+      const output = u.output_tokens ?? 0
+      const prev = best.get(id)
+      if (!prev || output > prev.output) best.set(id, { output, model: String(row.message.model), counts: [u.input_tokens ?? 0, u.cache_read_input_tokens ?? 0, w5, h] })
+    }
+  }
+  const sums = new Map<string, number[]>()
+  for (const { output, model, counts } of best.values()) {
+    const sum = sums.get(model) ?? [0, 0, 0, 0, 0]
+    ;[...counts, output].forEach((n, k) => (sum[k]! += Number(n) || 0))
+    sums.set(model, sum)
+  }
+  return [...sums].map(([model, sum]) => [model, ...sum].join('\t')).join('\n')
+}
+
+// A session's transcript, `<config>/projects/*/<id>.jsonl`, or '' while it
+// does not exist yet.
+async function transcriptOnWindows($: EngineInterface, sessionId: string): Promise<string> {
+  const exists = (path: string) => $.fs.exists(path).catch(() => false)
+  const projects = `${await configDir($)}/projects`
+  for (const e of await $.fs.list(projects).catch(() => [])) {
+    const path = `${projects}/${e.name}/${sessionId}.jsonl`
+    if (e.kind === 'dir' && (await exists(path))) return path
+  }
+  return ''
+}
+
+// The transcript's last custom-title row.
+async function lastTitleRow($: EngineInterface, path: string): Promise<string> {
+  const rows = await grepFile($, path, l => l.includes('"type":"custom-title"'))
+  return rows[rows.length - 1] ?? ''
+}
+
+const logPath = async ($: EngineInterface) => `${await configDir($)}/cache-clock.log`
+
+// Appends a line to the mod's log, keeping the last 500 once it passes 1000.
+async function appendLog($: EngineInterface, line: string): Promise<void> {
+  const path = await logPath($)
+  let lines = (await $.fs.read(path).catch(() => '')).split('\n').filter(Boolean)
+  lines.push(line)
+  if (lines.length > 1000) lines = lines.slice(-500)
+  await $.fs.write(path, `${lines.join('\n')}\n`)
+}
+
+// LOG_REFRESHES: the log's refreshes of the chat named `label`.
+async function logRefreshes($: EngineInterface, label: string): Promise<string> {
+  const text = await $.fs.read(await logPath($)).catch(() => '')
+  return text
+    .split('\n')
+    .filter(l => l.includes(` ${label} · refresh read `))
+    .join('\n')
+}
+
+// Plays the clip and prints a dot every 100 ms until it ends: each dot lets
+// the loop below see `signal` abort and leave, which stops the child and the
+// sound with it. The clip's length comes from its WAV header (data bytes over
+// byte rate).
+const PLAY =
+  '$f = $env:CACHE_CLOCK_SOUND; $b = [IO.File]::ReadAllBytes($f); ' +
+  '$ms = [int](($b.Length - 44) * 1000 / [BitConverter]::ToInt32($b, 28)); ' +
+  '$p = New-Object Media.SoundPlayer $f; $p.Play(); $end = [DateTime]::Now.AddMilliseconds($ms); ' +
+  "while ([DateTime]::Now -lt $end) { '.'; Start-Sleep -Milliseconds 100 }"
+
+async function playOnWindows($: EngineInterface, asset: string, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return
+  const child = $.process.spawn({
+    argv: ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', PLAY],
+    env: { CACHE_CLOCK_SOUND: `${$.plugin.root}/${asset}` },
+  })
+  for await (const _ of child) if (signal?.aborted) break
+}
+
 type ChatSpend = {
   /** Since when: the weekly rate-limit window's start, else 7 days back. */
   since: number
@@ -240,7 +428,9 @@ async function refreshSpend($: EngineInterface, flags: Flags, now: number): Prom
   const resets = Date.parse(usage?.rateLimits.find(r => r.kind === 'seven_day')?.resetsAt ?? '')
   const isWindow = Number.isFinite(resets)
   const since = isWindow ? resets - WEEK : now - WEEK
-  const out = await $.process.run(['/bin/sh', '-c', SPEND_SCRIPT, 'sh', String(Math.floor(since / 1000)), flags.transcript]).catch(() => null)
+  const out = (await isWindows($))
+    ? await spendRows($, flags.transcript, Math.floor(since / 1000)).then(asRun, () => null)
+    : await $.process.run(['/bin/sh', '-c', SPEND_SCRIPT, 'sh', String(Math.floor(since / 1000)), flags.transcript]).catch(() => null)
   if (!out || out.exitCode !== 0 || out.isStdoutTruncated) return
   flags.spend = parseSpend(out.stdout, since, isWindow)
   if (flags.sessionId) flags.ledger = (await readLedger($, flags.sessionId))?.days ?? {}
@@ -329,7 +519,9 @@ async function backfillLedger($: EngineInterface, flags: Flags, info: CacheInfo 
   const until = prev?.from || now
   const { base, read: readMult } = price(info?.model)
   const ttlMin = info?.ttlMin ?? DEFAULT_TTL
-  const out = await $.process.run(['/bin/sh', '-c', LOG_REFRESHES, 'sh', flags.label]).catch(() => null)
+  const out = (await isWindows($))
+    ? await logRefreshes($, flags.label).then(asRun, () => null)
+    : await $.process.run(['/bin/sh', '-c', LOG_REFRESHES, 'sh', flags.label]).catch(() => null)
   const sent: { at: number; paid: number }[] = []
   for (const line of (out?.stdout ?? '').split('\n')) {
     const m = line.match(/^(\S+) .* \(read (\d+), write (\d+), input (\d+)\)$/)
@@ -423,7 +615,9 @@ async function refreshStats($: EngineInterface, flags: Flags, isForced = false):
   const now = await $.clock.now()
   if (!isForced && now - flags.statsAt < (flags.stats ? STATS_EVERY : STATS_FIRST_EVERY)) return
   flags.statsAt = now
-  const out = await $.process.run(['/bin/sh', '-c', STATS_SCRIPT, 'sh', flags.transcript]).catch(() => null)
+  const out = (await isWindows($))
+    ? await statsRows($, flags.transcript).then(asRun, () => null)
+    : await $.process.run(['/bin/sh', '-c', STATS_SCRIPT, 'sh', flags.transcript]).catch(() => null)
   if (out && out.exitCode === 0 && !out.isStdoutTruncated) flags.stats = parseStats(out.stdout) ?? flags.stats
   await refreshSpend($, flags, now).catch(() => {})
 }
@@ -901,8 +1095,14 @@ const bare = (id: string) => id.replace(/\[.*\]$/, '')
 // Walks the transcript's tail back to the last response (time, model, prompt
 // size), a compaction after it, and the last cache write's TTL. A subagent's
 // own transcript holds only sidechain rows.
+const TAIL_BYTES = 3_000_000
+const tailOf = async ($: EngineInterface, path: string) =>
+  (await isWindows($))
+    ? tailFile($, path, TAIL_BYTES).then(asRun, () => null)
+    : $.process.run(['tail', '-c', String(TAIL_BYTES), path]).catch(() => null)
+
 async function fromTranscript($: EngineInterface, path: string, isAgent = false): Promise<CacheInfo | null> {
-  const tail = await $.process.run(['tail', '-c', '3000000', path]).catch(() => null)
+  const tail = await tailOf($, path)
   if (!tail || tail.exitCode !== 0) return null
 
   const lines = tail.stdout.split('\n')
@@ -948,7 +1148,7 @@ async function fromTranscript($: EngineInterface, path: string, isAgent = false)
 // Whether the chat compacted after `since`: a message sent as it compacts can
 // go out before the compaction reaches the mod's record.
 async function compactedSince($: EngineInterface, path: string, since: number): Promise<boolean> {
-  const tail = path ? await $.process.run(['tail', '-c', '3000000', path]).catch(() => null) : null
+  const tail = path ? await tailOf($, path) : null
   return (tail?.stdout ?? '').split('\n').some(line => {
     if (!line.includes('"compact_boundary"')) return false
     try {
@@ -978,11 +1178,13 @@ function requestStart(lines: string[], i: number, id: string | undefined): numbe
 }
 
 // A session's transcript is named after it; a new chat's is written with its first message.
-const findTranscript = ($: EngineInterface, sessionId: string) =>
-  $.process
-    .run(['/bin/sh', '-c', 'ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$1".jsonl 2>/dev/null | head -1', 'sh', sessionId])
-    .then(found => found.stdout.trim())
-    .catch(() => '')
+const findTranscript = async ($: EngineInterface, sessionId: string) =>
+  (await isWindows($))
+    ? transcriptOnWindows($, sessionId).catch(() => '')
+    : $.process
+        .run(['/bin/sh', '-c', 'ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$1".jsonl 2>/dev/null | head -1', 'sh', sessionId])
+        .then(found => found.stdout.trim())
+        .catch(() => '')
 
 const markCompacted = ($: EngineInterface, at: number) =>
   update($, cache, prev => ({ at, ttlMin: prev?.ttlMin ?? DEFAULT_TTL, model: prev?.model, isCompacted: true }))
@@ -1028,13 +1230,15 @@ async function seed($: EngineInterface, path: string): Promise<void> {
 async function chatLabel($: EngineInterface, path: string): Promise<string> {
   const found = !path
     ? null
-    : await $.process.run(['/bin/sh', '-c', 'grep -h \'"type":"custom-title"\' "$1" 2>/dev/null | tail -1', 'sh', path]).catch(() => null)
+    : (await isWindows($))
+      ? await lastTitleRow($, path).then(asRun, () => null)
+      : await $.process.run(['/bin/sh', '-c', 'grep -h \'"type":"custom-title"\' "$1" 2>/dev/null | tail -1', 'sh', path]).catch(() => null)
   try {
     const title = JSON.parse(found?.stdout ?? '').customTitle
     if (typeof title === 'string' && title) return title
   } catch {}
   const cwd = await $.session.cwd().catch(() => '')
-  return cwd.split('/').filter(Boolean).pop() ?? 'chat'
+  return cwd.split(/[\\/]/).filter(Boolean).pop() ?? 'chat'
 }
 
 // "59:59" counting down from a 1h TTL ("60:00" at the start); hours only past that.
@@ -1280,6 +1484,7 @@ async function refresh($: EngineInterface, flags: Flags, sentAt: number): Promis
 // Keeps the last 500 lines once it passes 1000.
 async function logLine($: EngineInterface, flags: Flags, at: number, text: string): Promise<void> {
   const line = `${new Date(at).toISOString()} ${flags.label || flags.sessionId} · ${text}`
+  if (await isWindows($)) return appendLog($, line).catch(() => {})
   const script = 'f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cache-clock.log"; printf "%s\\n" "$1" >> "$f"; [ "$(wc -l < "$f")" -gt 1000 ] && tail -n 500 "$f" > "$f.tmp" && mv "$f.tmp" "$f"; true'
   await $.process.run(['/bin/sh', '-c', script, 'sh', line]).catch(() => {})
 }
@@ -1331,6 +1536,8 @@ async function setSound($: EngineInterface, flags: Flags, isOn: boolean): Promis
 // Plays one of the mod's sounds unless they are muted; aborting `ctl` stops it.
 async function playSound($: EngineInterface, asset: string, ctl?: AbortController): Promise<void> {
   if (!(await isSoundOn($))) return
+  // The engine has no audio player on Windows.
+  if (await isWindows($)) return playOnWindows($, asset, ctl?.signal).catch(() => {})
   await $.audio.play({ asset }, ctl ? { signal: ctl.signal } : undefined).catch(() => {})
 }
 
